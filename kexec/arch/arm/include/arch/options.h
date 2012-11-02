@@ -36,8 +36,8 @@
 	{ "append",		1, 0, OPT_APPEND },	\
 	{ "initrd",		1, 0, OPT_RAMDISK },	\
 	{ "ramdisk",		1, 0, OPT_RAMDISK },	\
-	{ "dtb",		1, 0, OPT_DTB }, 	\
-	{ "atags",		0, 0, OPT_ATAGS },
+	{ "devtree",		1, 0, OPT_DTB }, 	\
+	{ "atags",		1, 0, OPT_ATAGS },
 
 #define KEXEC_ALL_OPT_STR KEXEC_ARCH_OPT_STR "a:r:"
 

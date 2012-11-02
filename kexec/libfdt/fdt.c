@@ -50,6 +50,7 @@
  */
 #include "libfdt_env.h"
 
+#include <stdio.h>
 #include <fdt.h>
 #include <libfdt.h>
 
@@ -57,17 +58,25 @@
 
 int fdt_check_header(const void *fdt)
 {
+	printf("CHECK FTD_MAGIC(%x) = %x\n", FDT_MAGIC, fdt_magic(fdt));
 	if (fdt_magic(fdt) == FDT_MAGIC) {
 		/* Complete tree */
-		if (fdt_version(fdt) < FDT_FIRST_SUPPORTED_VERSION)
+		if (fdt_version(fdt) < FDT_FIRST_SUPPORTED_VERSION) {
+			fprintf(stderr, "FDT_ERR_BADVERSION\n");
 			return -FDT_ERR_BADVERSION;
-		if (fdt_last_comp_version(fdt) > FDT_LAST_SUPPORTED_VERSION)
+		}
+		if (fdt_last_comp_version(fdt) > FDT_LAST_SUPPORTED_VERSION) {
+			fprintf(stderr, "FDT_ERR_BADVERSION\n");
 			return -FDT_ERR_BADVERSION;
+		}
 	} else if (fdt_magic(fdt) == FDT_SW_MAGIC) {
 		/* Unfinished sequential-write blob */
-		if (fdt_size_dt_struct(fdt) == 0)
+		if (fdt_size_dt_struct(fdt) == 0) {
+			fprintf(stderr, "FDT_ERR_BADSTATE\n");
 			return -FDT_ERR_BADSTATE;
+		}
 	} else {
+		fprintf(stderr, "FDT_ERR_BADMAGIC\n");
 		return -FDT_ERR_BADMAGIC;
 	}
 

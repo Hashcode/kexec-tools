@@ -1,0 +1,5 @@
+export PATH=$PATH:~/android/omapzoom/build_tools/arm-2010q1/bin
+export CC=~/android/omapzoom/build_tools/arm-2010q1/bin/arm-none-linux-gnueabi-gcc
+./bootstrap
+LDFLAGS=-static ./configure
+make ARCH=arm
