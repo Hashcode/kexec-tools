@@ -14,9 +14,9 @@
 #include "kexec-dev.h"
 
 int dev_kexec_open() {
-        int fd = open("/dev/ion", O_RDWR);
+        int fd = open("/dev/kexec", O_RDWR);
         if (fd < 0)
-                fprintf(stderr, "open /dev/ion failed!\n");
+                fprintf(stderr, "open /dev/kexec failed!\n");
         return fd;
 }
 
@@ -33,9 +33,10 @@ static int dev_kexec_ioctl(int fd, int req, void *arg) {
 int dev_kexec_load(void *entry, int nr_segments,
 		   struct kexec_segment *segment, unsigned long kexec_flags)
 {
-	int ret = 0;
+	int ret = -1;
 	int fd = dev_kexec_open();
-	if (!fd) {
+	fprintf(stderr, "dev_kexec_load: open fd=%d\n", fd);
+	if (fd >= 0) {
 		struct kexec_param data = {
 			.entry = entry,
 			.nr_segments = nr_segments,
@@ -50,9 +51,10 @@ int dev_kexec_load(void *entry, int nr_segments,
 
 int dev_kexec_reboot(int magic_num)
 {
-	int ret = 0;
+	int ret = -1;
 	int fd = dev_kexec_open();
-	if (!fd) {
+	fprintf(stderr, "dev_kexec_reboot: open fd=%d\n", fd);
+	if (fd >= 0) {
 		ret = dev_kexec_ioctl(fd, KEXEC_IOC_REBOOT, NULL);
         	close(fd);
 	}

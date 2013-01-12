@@ -772,10 +772,10 @@ static int my_load(const char *type, int fileind, int argc, char **argv,
 		/* The load failed, print some debugging information */
 		fprintf(stderr, "kexec_load failed: %s\n", 
 			strerror(errno));
-		fprintf(stderr, "entry       = %p flags = %lx\n", 
-			info.entry, info.kexec_flags);
-		print_segments(stderr, &info);
 	}
+	fprintf(stderr, "entry       = %p flags = %lx\n", 
+		info.entry, info.kexec_flags);
+	print_segments(stderr, &info);
 	return result;
 }
 

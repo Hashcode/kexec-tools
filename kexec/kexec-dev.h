@@ -11,7 +11,7 @@ struct kexec_param {
 	unsigned long kexec_flags;
 };
 
-int dev_kexec_open();
+int dev_kexec_open(void);
 static int dev_kexec_ioctl(int fd, int req, void *arg);
 int dev_kexec_load(void *entry, int nr_segments,
 		   struct kexec_segment *segment, unsigned long kexec_flags);
