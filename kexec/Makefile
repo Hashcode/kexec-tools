@@ -11,6 +11,7 @@ KEXEC_SRCS = $(KEXEC_SRCS_base)
 KEXEC_GENERATED_SRCS =
 
 KEXEC_SRCS_base += kexec/kexec.c
+KEXEC_SRCS_base += kexec/kexec-dev.c
 KEXEC_SRCS_base += kexec/ifdown.c
 KEXEC_SRCS_base += kexec/kexec-elf.c
 KEXEC_SRCS_base += kexec/kexec-elf-exec.c

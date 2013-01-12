@@ -48,6 +48,8 @@
 #include "kexec-lzma.h"
 #include <arch/options.h>
 
+#include "kexec-dev.h"
+
 unsigned long long mem_min = 0;
 unsigned long long mem_max = ULONG_MAX;
 static unsigned long kexec_flags = 0;
@@ -764,7 +766,7 @@ static int my_load(const char *type, int fileind, int argc, char **argv,
 		info.entry, info.kexec_flags);
 	print_segments(stderr, &info);
 #endif
-	result = kexec_load(
+	result = dev_kexec_load(
 		info.entry, info.nr_segments, info.segment, info.kexec_flags);
 	if (result != 0) {
 		/* The load failed, print some debugging information */
@@ -789,7 +791,7 @@ static int k_unload (unsigned long kexec_flags)
 	}
 	kexec_flags |= native_arch;
 
-	result = kexec_load(NULL, 0, NULL, kexec_flags);
+	result = dev_kexec_load(NULL, 0, NULL, kexec_flags);
 	if (result != 0) {
 		/* The unload failed, print some debugging information */
 		fprintf(stderr, "kexec_load (0 segments) failed: %s\n",
@@ -823,7 +825,7 @@ static int my_shutdown(void)
  */
 static int my_exec(void)
 {
-	reboot(LINUX_REBOOT_CMD_KEXEC);
+	dev_kexec_reboot(LINUX_REBOOT_CMD_KEXEC);
 	/* I have failed if I make it here */
 	fprintf(stderr, "kexec failed: %s\n", 
 		strerror(errno));
@@ -838,7 +840,7 @@ static int load_jump_back_helper_image(unsigned long kexec_flags, void *entry)
 	struct kexec_segment seg;
 
 	memset(&seg, 0, sizeof(seg));
-	result = kexec_load(entry, 1, &seg, kexec_flags);
+	result = dev_kexec_load(entry, 1, &seg, kexec_flags);
 	return result;
 }
 
