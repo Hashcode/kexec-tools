@@ -60,3 +60,15 @@ int dev_kexec_reboot(int magic_num)
 	}
 	return ret;
 }
+
+int dev_kexec_check_loaded(void)
+{
+	int ret = -1;
+	int fd = dev_kexec_open();
+	fprintf(stderr, "dev_kexec_check_loaded: open fd=%d\n", fd);
+	if (fd >= 0) {
+		ret = dev_kexec_ioctl(fd, KEXEC_IOC_CHECK_LOADED, NULL);
+		close(fd);
+	}
+	return ret;
+}

@@ -921,6 +921,7 @@ void usage(void)
 
 static int kexec_loaded(void)
 {
+#if 0
 	long ret = -1;
 	FILE *fp;
 	char *p;
@@ -945,8 +946,8 @@ static int kexec_loaded(void)
 	/* No digits were found */
 	if (p == line)
 		return -1;
-
-	return (int)ret;
+#endif
+	return dev_kexec_check_loaded();
 }
 
 /*
