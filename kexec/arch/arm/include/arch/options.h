@@ -7,6 +7,7 @@
 #define OPT_RAMDISK	'r'
 #define OPT_DTB     (OPT_ARCH_MAX+0)
 #define OPT_ATAGS   (OPT_ARCH_MAX+1)
+#define OPT_ATAGS_FILE   (OPT_ARCH_MAX+2)
 
 /* Options relevant to the architecture (excluding loader-specific ones),
  * in this case none:
@@ -36,8 +37,9 @@
 	{ "append",		1, 0, OPT_APPEND },	\
 	{ "initrd",		1, 0, OPT_RAMDISK },	\
 	{ "ramdisk",		1, 0, OPT_RAMDISK },	\
-	{ "devtree",		1, 0, OPT_DTB }, 	\
-	{ "atags",		1, 0, OPT_ATAGS },
+	{ "dtb",		1, 0, OPT_DTB }, 	\
+	{ "atags",		0, 0, OPT_ATAGS },	\
+	{ "atags-file",		1, 0, OPT_ATAGS_FILE },
 
 #define KEXEC_ALL_OPT_STR KEXEC_ARCH_OPT_STR "a:r:"
 

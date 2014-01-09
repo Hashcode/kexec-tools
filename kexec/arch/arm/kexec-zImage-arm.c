@@ -63,15 +63,6 @@ struct tag_initrd {
         uint32_t size;     /* size of compressed ramdisk image in bytes */
 };
 
-/* ETERNITYPROJECT START: Define the DEVTREE tag */
-
-#define ATAG_DEVTREE 0xF100040A
-struct tag_devtree {
-        uint32_t start;
-        uint32_t size;
-};
-
-
 /* command line: \0 terminated string */
 #define ATAG_CMDLINE    0x54410009
 
@@ -88,7 +79,6 @@ struct tag {
 		struct tag_core	 core;
 		struct tag_mem32	mem;
 		struct tag_initrd       initrd;
-		struct tag_devtree	devtree;
 		struct tag_cmdline      cmdline;
 	} u;
 };
@@ -113,7 +103,8 @@ void zImage_arm_usage(void)
 		"     --initrd=FILE         Use FILE as the kernel's initial ramdisk.\n"
 		"     --ramdisk=FILE        Use FILE as the kernel's initial ramdisk.\n"
 		"     --dtb=FILE            Use FILE as the fdt blob.\n"
-		"     --atags=FILE          Use FILE as ATAGs.\n"
+		"     --atags               Use ATAGs instead of device-tree.\n"
+		"     --atags-file=FILE     Use FILE as ATAGs.\n"
 		);
 }
 
@@ -121,7 +112,7 @@ static
 struct tag * atag_read_tags(void)
 {
 	static unsigned long buf[BOOT_PARAMS_SIZE];
-	char def_fn[]= "/atags";
+	const char def_fn[]= "/atags";
 	char *fn = atags_file;
 	FILE *fp;
 
@@ -155,16 +146,14 @@ struct tag * atag_read_tags(void)
 static
 int atag_arm_load(struct kexec_info *info, unsigned long base,
 	const char *command_line, off_t command_line_len,
-	const char *initrd, off_t initrd_len, off_t initrd_off,
-	const char *devtree, off_t devtree_len, off_t devtree_off)
+	const char *initrd, off_t initrd_len, off_t initrd_off)
 {
 	struct tag *saved_tags = atag_read_tags();
 	char *buf;
 	off_t len;
 	struct tag *params;
 	uint32_t *initrd_start = NULL;
-	uint32_t *devtree_start = NULL;
-
+	
 	buf = xmalloc(getpagesize());
 	if (!buf) {
 		fprintf(stderr, "Compiling ATAGs: out of memory\n");
@@ -181,7 +170,6 @@ int atag_arm_load(struct kexec_info *info, unsigned long base,
 			switch (saved_tags->hdr.tag) {
 			case ATAG_INITRD:
 			case ATAG_INITRD2:
-			case ATAG_DEVTREE:
 			case ATAG_CMDLINE:
 			case ATAG_NONE:
 				// skip these tags
@@ -196,15 +184,6 @@ int atag_arm_load(struct kexec_info *info, unsigned long base,
 	} else {
 		params->hdr.size = 2;
 		params->hdr.tag = ATAG_CORE;
-		params = tag_next(params);
-	}
-
-	if (devtree) {
-		printf("\nAdding Device Tree...\n");
-		params->hdr.size = tag_size(tag_devtree);
-		params->hdr.tag = ATAG_DEVTREE;
-		devtree_start = &params->u.devtree.start;
-		params->u.devtree.size = devtree_len;
 		params = tag_next(params);
 	}
 
@@ -243,15 +222,6 @@ int atag_arm_load(struct kexec_info *info, unsigned long base,
 		add_segment(info, initrd, initrd_len, *initrd_start, initrd_len);
 	}
 
-	if (devtree) {
-		*devtree_start = locate_hole(info, devtree_len, getpagesize(),
-				 devtree_off, ULONG_MAX, INT_MAX);
-		if (*devtree_start == ULONG_MAX)
-			return -1;
-		printf("Devtree segment info: %lx (%d)\n", devtree_start, devtree_len);
-		add_segment(info, devtree, devtree_len, *devtree_start, devtree_len);
-	}
-
 	return 0;
 }
 
@@ -267,6 +237,7 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 	const char *ramdisk;
 	char *ramdisk_buf;
 	int opt;
+	int use_atags;
 	char *dtb_buf;
 	off_t dtb_length;
 	char *dtb_file;
@@ -278,9 +249,10 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 		{ "command-line",	1, 0, OPT_APPEND },
 		{ "append",		1, 0, OPT_APPEND },
 		{ "initrd",		1, 0, OPT_RAMDISK },
-		{ "ramdisk",	1, 0, OPT_RAMDISK },
-		{ "devtree",	1, 0, OPT_DTB },
-		{ "atags",		1, 0, OPT_ATAGS },
+		{ "ramdisk",		1, 0, OPT_RAMDISK },
+		{ "dtb",		1, 0, OPT_DTB },
+		{ "atags",		0, 0, OPT_ATAGS },
+		{ "atags-file",		1, 0, OPT_ATAGS },
 		{ 0, 			0, 0, 0 },
 	};
 	static const char short_options[] = KEXEC_ARCH_OPT_STR "a:r:";
@@ -293,6 +265,7 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 	ramdisk = 0;
 	ramdisk_buf = 0;
 	initrd_size = 0;
+	use_atags = 0;
 	dtb_file = NULL;
 	while((opt = getopt_long(argc, argv, short_options, options, 0)) != -1) {
 		switch(opt) {
@@ -314,10 +287,20 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 			dtb_file = optarg;
 			break;
 		case OPT_ATAGS:
+			use_atags = 1;
+			break;
+		case OPT_ATAGS_FILE:
 			atags_file = optarg;
 			break;
 		}
 	}
+
+	if (use_atags && dtb_file) {
+		fprintf(stderr, "You can only use ATAGs if you don't specify a "
+		        "dtb file.\n");
+		return -1;
+	}
+
 	if (command_line) {
 		command_line_len = strlen(command_line) + 1;
 		if (command_line_len > COMMAND_LINE_SIZE)
@@ -376,15 +359,42 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 	/* assume the maximum kernel compression ratio is 4,
 	 * and just to be safe, place ramdisk after that
 	 */
-	initrd_base = base + (len * 4) + getpagesize();
-	initrd_base &= ~(getpagesize() - 1);
+	initrd_base = base + len * 4;
 
+	if (use_atags) {
+		/*
+		 * use ATAGs from /proc/atags
+		 */
+		if (atag_arm_load(info, base + atag_offset,
+		                  command_line, command_line_len,
+		                  ramdisk_buf, initrd_size, initrd_base) == -1)
+			return -1;
+	} else {
+		/*
+		 * Read a user-specified DTB file.
+		 */
+		if (dtb_file) {
+			dtb_buf = slurp_file(dtb_file, &dtb_length);
+		} else {
+			/*
+			 * Extract the DTB from /proc/device-tree.
+			 */
+			create_flatten_tree(&dtb_buf, &dtb_length, command_line);
+		}
 
-	if (dtb_file) {
-		dtb_buf = slurp_file(dtb_file, &dtb_length);
 		if (fdt_check_header(dtb_buf) != 0) {
 			fprintf(stderr, "Invalid FDT buffer.\n");
 			return -1;
+		}
+
+		if (base + atag_offset + dtb_length > base + offset) {
+			fprintf(stderr, "DTB too large!\n");
+			return -1;
+		}
+
+		if (ramdisk) {
+			add_segment(info, ramdisk_buf, initrd_size,
+			            initrd_base, initrd_size);
 		}
 
 		/* Stick the dtb at the end of the initrd and page
@@ -393,18 +403,8 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 		dtb_offset = initrd_base + initrd_size + getpagesize();
 		dtb_offset &= ~(getpagesize() - 1);
 
-		if (atag_arm_load(info, base + atag_offset,
-                  command_line, command_line_len,
-                  ramdisk_buf, initrd_size, initrd_base,
-                  dtb_buf, dtb_length, dtb_offset) == -1)
-			return -1;
-	}
-	else {
-		if (ramdisk) {
-			printf("Ramdisk segment: %lx (%ld)\n", initrd_base, initrd_size);
-			add_segment(info, ramdisk_buf, initrd_size,
-				        initrd_base, initrd_size);
-		}
+		add_segment(info, dtb_buf, dtb_length,
+		            dtb_offset, dtb_length);
 	}
 
 	printf("Kernel segment info: %lx (%d)\n", base+offset, len);
