@@ -757,10 +757,9 @@ static int my_load(const char *type, int fileind, int argc, char **argv,
 	if (entry)
 		info.entry = entry;
 
-	dbgprintf("kexec_load: entry = %p flags = 0x%lx\n",
+	printf("kexec_load: entry = %p flags = 0x%lx\n",
 		  info.entry, info.kexec_flags);
-	if (kexec_debug)
-		print_segments(stderr, &info);
+	print_segments(stderr, &info);
 
 	if (xen_present())
 		result = xen_kexec_load(&info);
