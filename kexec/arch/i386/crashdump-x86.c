@@ -43,14 +43,7 @@
 #include "crashdump-x86.h"
 
 #ifdef HAVE_LIBXENCTRL
-#ifdef HAVE_XC_GET_MACHINE_MEMORY_MAP
 #include <xenctrl.h>
-#else
-#define __XEN_TOOLS__	1
-#include <xen/xen.h>
-#include <xen/memory.h>
-#include <xen/sys/privcmd.h>
-#endif /* HAVE_XC_GET_MACHINE_MEMORY_MAP */
 #endif /* HAVE_LIBXENCTRL */
 
 #include <x86/x86-linux.h>
@@ -96,7 +89,8 @@ static int get_kernel_paddr(struct kexec_info *UNUSED(info),
 
 	if (parse_iomem_single("Kernel code\n", &start, NULL) == 0) {
 		elf_info->kern_paddr_start = start;
-		dbgprintf("kernel load physical addr start = 0x%016Lx\n", start);
+		dbgprintf("kernel load physical addr start = 0x%016Lx\n",
+			  (unsigned long long)start);
 		return 0;
 	}
 
@@ -120,7 +114,7 @@ static int get_kernel_vaddr_and_size(struct kexec_info *UNUSED(info),
 	struct mem_ehdr ehdr;
 	struct mem_phdr *phdr, *end_phdr;
 	int align;
-	unsigned long size;
+	off_t size;
 	uint32_t elf_flags = 0;
 
 	if (elf_info->machine != EM_X86_64)
@@ -130,8 +124,7 @@ static int get_kernel_vaddr_and_size(struct kexec_info *UNUSED(info),
 		return 0;
 
 	align = getpagesize();
-	size = KCORE_ELF_HEADERS_SIZE;
-	buf = slurp_file_len(kcore, size);
+	buf = slurp_file_len(kcore, KCORE_ELF_HEADERS_SIZE, &size);
 	if (!buf) {
 		fprintf(stderr, "Cannot read %s: %s\n", kcore, strerror(errno));
 		return -1;
@@ -162,13 +155,13 @@ static int get_kernel_vaddr_and_size(struct kexec_info *UNUSED(info),
 			/* Look for kernel text mapping header. */
 			if ((saddr >= X86_64__START_KERNEL_map) &&
 			    (eaddr <= X86_64__START_KERNEL_map + X86_64_KERNEL_TEXT_SIZE)) {
-				saddr = (saddr) & (~(X86_64_KERN_VADDR_ALIGN - 1));
+				saddr = _ALIGN_DOWN(saddr, X86_64_KERN_VADDR_ALIGN);
 				elf_info->kern_vaddr_start = saddr;
 				size = eaddr - saddr;
 				/* Align size to page size boundary. */
-				size = (size + align - 1) & (~(align - 1));
+				size = _ALIGN(size, align);
 				elf_info->kern_size = size;
-				dbgprintf("kernel vaddr = 0x%lx size = 0x%llx\n",
+				dbgprintf("kernel vaddr = 0x%llx size = 0x%llx\n",
 					saddr, size);
 				return 0;
 			}
@@ -187,7 +180,9 @@ static int exclude_region(int *nr_ranges, uint64_t start, uint64_t end);
 static struct memory_range crash_memory_range[CRASH_MAX_MEMORY_RANGES];
 
 /* Memory region reserved for storing panic kernel and other data. */
-static struct memory_range crash_reserved_mem;
+#define CRASH_RESERVED_MEM_NR	8
+static struct memory_range crash_reserved_mem[CRASH_RESERVED_MEM_NR];
+static int crash_reserved_mem_nr;
 
 /* Reads the appropriate file and retrieves the SYSTEM RAM regions for whom to
  * create Elf headers. Keeping it separate from get_memory_ranges() as
@@ -204,7 +199,7 @@ static int get_crash_memory_ranges(struct memory_range **range, int *ranges,
 				   int kexec_flags, unsigned long lowmem_limit)
 {
 	const char *iomem = proc_iomem();
-	int memory_ranges = 0, gart = 0;
+	int memory_ranges = 0, gart = 0, i;
 	char line[MAX_LINE];
 	FILE *fp;
 	unsigned long long start, end;
@@ -263,25 +258,28 @@ static int get_crash_memory_ranges(struct memory_range **range, int *ranges,
 	}
 	fclose(fp);
 	if (kexec_flags & KEXEC_PRESERVE_CONTEXT) {
-		int i;
 		for (i = 0; i < memory_ranges; i++) {
 			if (crash_memory_range[i].end > 0x0009ffff) {
-				crash_reserved_mem.start = \
+				crash_reserved_mem[0].start = \
 					crash_memory_range[i].start;
 				break;
 			}
 		}
-		if (crash_reserved_mem.start >= mem_max) {
+		if (crash_reserved_mem[0].start >= mem_max) {
 			fprintf(stderr, "Too small mem_max: 0x%llx.\n",
 				mem_max);
 			return -1;
 		}
-		crash_reserved_mem.end = mem_max;
-		crash_reserved_mem.type = RANGE_RAM;
+		crash_reserved_mem[0].end = mem_max;
+		crash_reserved_mem[0].type = RANGE_RAM;
+		crash_reserved_mem_nr = 1;
 	}
-	if (exclude_region(&memory_ranges, crash_reserved_mem.start,
-				crash_reserved_mem.end) < 0)
-		return -1;
+
+	for (i = 0; i < crash_reserved_mem_nr; i++)
+		if (exclude_region(&memory_ranges, crash_reserved_mem[i].start,
+				crash_reserved_mem[i].end) < 0)
+			return -1;
+
 	if (gart) {
 		/* exclude GART region if the system has one */
 		if (exclude_region(&memory_ranges, gart_start, gart_end) < 0)
@@ -294,34 +292,20 @@ static int get_crash_memory_ranges(struct memory_range **range, int *ranges,
 }
 
 #ifdef HAVE_LIBXENCTRL
-#ifdef HAVE_XC_GET_MACHINE_MEMORY_MAP
 static int get_crash_memory_ranges_xen(struct memory_range **range,
 					int *ranges, unsigned long lowmem_limit)
 {
 	int j, rc, ret = -1;
 	struct e820entry e820entries[CRASH_MAX_MEMORY_RANGES];
 	unsigned int i;
-#ifdef XENCTRL_HAS_XC_INTERFACE
 	xc_interface *xc;
-#else
-	int xc;
-#endif
 
-#ifdef XENCTRL_HAS_XC_INTERFACE
 	xc = xc_interface_open(NULL, NULL, 0);
 
 	if (!xc) {
 		fprintf(stderr, "%s: Failed to open Xen control interface\n", __func__);
-		goto err;
+		return -1;
 	}
-#else
-	xc = xc_interface_open();
-
-	if (xc == -1) {
-		fprintf(stderr, "%s: Failed to open Xen control interface\n", __func__);
-		goto err;
-	}
-#endif
 
 	rc = xc_get_machine_memory_map(xc, e820entries, CRASH_MAX_MEMORY_RANGES);
 
@@ -342,9 +326,10 @@ static int get_crash_memory_ranges_xen(struct memory_range **range,
 
 	qsort(*range, *ranges, sizeof(struct memory_range), compare_ranges);
 
-	if (exclude_region(ranges, crash_reserved_mem.start,
-						crash_reserved_mem.end) < 0)
-		goto err;
+	for (i = 0; i < crash_reserved_mem_nr; i++)
+		if (exclude_region(ranges, crash_reserved_mem[i].start,
+						crash_reserved_mem[i].end) < 0)
+			goto err;
 
 	ret = 0;
 
@@ -353,94 +338,6 @@ err:
 
 	return ret;
 }
-#else
-static int get_crash_memory_ranges_xen(struct memory_range **range,
-					int *ranges, unsigned long lowmem_limit)
-{
-	int fd, j, rc, ret = -1;
-	privcmd_hypercall_t hypercall;
-	struct e820entry *e820entries = NULL;
-	struct xen_memory_map *xen_memory_map = NULL;
-	unsigned int i;
-
-	fd = open("/proc/xen/privcmd", O_RDWR);
-
-	if (fd == -1) {
-		fprintf(stderr, "%s: open(/proc/xen/privcmd): %m\n", __func__);
-		goto err;
-	}
-
-	rc = posix_memalign((void **)&e820entries, getpagesize(),
-			    sizeof(struct e820entry) * CRASH_MAX_MEMORY_RANGES);
-
-	if (rc) {
-		fprintf(stderr, "%s: posix_memalign(e820entries): %s\n", __func__, strerror(rc));
-		e820entries = NULL;
-		goto err;
-	}
-
-	rc = posix_memalign((void **)&xen_memory_map, getpagesize(),
-			    sizeof(struct xen_memory_map));
-
-	if (rc) {
-		fprintf(stderr, "%s: posix_memalign(xen_memory_map): %s\n", __func__, strerror(rc));
-		xen_memory_map = NULL;
-		goto err;
-	}
-
-	if (mlock(e820entries, sizeof(struct e820entry) * CRASH_MAX_MEMORY_RANGES) == -1) {
-		fprintf(stderr, "%s: mlock(e820entries): %m\n", __func__);
-		goto err;
-	}
-
-	if (mlock(xen_memory_map, sizeof(struct xen_memory_map)) == -1) {
-		fprintf(stderr, "%s: mlock(xen_memory_map): %m\n", __func__);
-		goto err;
-	}
-
-	xen_memory_map->nr_entries = CRASH_MAX_MEMORY_RANGES;
-	set_xen_guest_handle(xen_memory_map->buffer, e820entries);
-
-	hypercall.op = __HYPERVISOR_memory_op;
-	hypercall.arg[0] = XENMEM_machine_memory_map;
-	hypercall.arg[1] = (__u64)xen_memory_map;
-
-	rc = ioctl(fd, IOCTL_PRIVCMD_HYPERCALL, &hypercall);
-
-	if (rc == -1) {
-		fprintf(stderr, "%s: ioctl(IOCTL_PRIVCMD_HYPERCALL): %m\n", __func__);
-		goto err;
-	}
-
-	for (i = 0, j = 0; i < xen_memory_map->nr_entries &&
-				j < CRASH_MAX_MEMORY_RANGES; ++i, ++j) {
-		crash_memory_range[j].start = e820entries[i].addr;
-		crash_memory_range[j].end = e820entries[i].addr + e820entries[i].size - 1;
-		crash_memory_range[j].type = xen_e820_to_kexec_type(e820entries[i].type);
-		segregate_lowmem_region(&j, lowmem_limit);
-	}
-
-	*range = crash_memory_range;
-	*ranges = j;
-
-	qsort(*range, *ranges, sizeof(struct memory_range), compare_ranges);
-
-	if (exclude_region(ranges, crash_reserved_mem.start,
-						crash_reserved_mem.end) < 0)
-		goto err;
-
-	ret = 0;
-
-err:
-	munlock(xen_memory_map, sizeof(struct xen_memory_map));
-	munlock(e820entries, sizeof(struct e820entry) * CRASH_MAX_MEMORY_RANGES);
-	free(xen_memory_map);
-	free(e820entries);
-	close(fd);
-
-	return ret;
-}
-#endif /* HAVE_XC_GET_MACHINE_MEMORY_MAP */
 #else
 static int get_crash_memory_ranges_xen(struct memory_range **range,
 					int *ranges, unsigned long lowmem_limit)
@@ -676,13 +573,40 @@ static void ultoa(unsigned long i, char *str)
 	}
 }
 
+static void cmdline_add_memmap_internal(char *cmdline, unsigned long startk,
+					unsigned long endk, int type)
+{
+	int cmdlen, len;
+	char str_mmap[256], str_tmp[20];
+
+	strcpy (str_mmap, " memmap=");
+	ultoa((endk-startk), str_tmp);
+	strcat (str_mmap, str_tmp);
+
+	if (type == RANGE_RAM)
+		strcat (str_mmap, "K@");
+	else if (type == RANGE_RESERVED)
+		strcat (str_mmap, "K$");
+	else if (type == RANGE_ACPI || type == RANGE_ACPI_NVS)
+		strcat (str_mmap, "K#");
+
+	ultoa(startk, str_tmp);
+	strcat (str_mmap, str_tmp);
+	strcat (str_mmap, "K");
+	len = strlen(str_mmap);
+	cmdlen = strlen(cmdline) + len;
+	if (cmdlen > (COMMAND_LINE_SIZE - 1))
+		die("Command line overflow\n");
+	strcat(cmdline, str_mmap);
+}
+
 /* Adds the appropriate memmap= options to command line, indicating the
  * memory regions the new kernel can use to boot into. */
 static int cmdline_add_memmap(char *cmdline, struct memory_range *memmap_p)
 {
 	int i, cmdlen, len;
 	unsigned long min_sizek = 100;
-	char str_mmap[256], str_tmp[20];
+	char str_mmap[256];
 
 	/* Exact map */
 	strcpy(str_mmap, " memmap=exactmap");
@@ -704,18 +628,7 @@ static int cmdline_add_memmap(char *cmdline, struct memory_range *memmap_p)
 		 * up precious command line length. */
 		if ((endk - startk) < min_sizek)
 			continue;
-		strcpy (str_mmap, " memmap=");
-		ultoa((endk-startk), str_tmp);
-		strcat (str_mmap, str_tmp);
-		strcat (str_mmap, "K@");
-		ultoa(startk, str_tmp);
-		strcat (str_mmap, str_tmp);
-		strcat (str_mmap, "K");
-		len = strlen(str_mmap);
-		cmdlen = strlen(cmdline) + len;
-		if (cmdlen > (COMMAND_LINE_SIZE - 1))
-			die("Command line overflow\n");
-		strcat(cmdline, str_mmap);
+		cmdline_add_memmap_internal(cmdline, startk, endk, RANGE_RAM);
 	}
 
 	dbgprintf("Command line after adding memmap\n");
@@ -778,7 +691,8 @@ static int get_crash_notes(int cpu, uint64_t *addr, uint64_t *len)
 		*addr = x86__pa(vaddr + (cpu * MAX_NOTE_BYTES));
 		*len = MAX_NOTE_BYTES;
 
-		dbgprintf("crash_notes addr = %Lx\n", *addr);
+		dbgprintf("crash_notes addr = %Lx\n",
+			  (unsigned long long)*addr);
 
 		fclose(fp);
 		return 0;
@@ -807,27 +721,15 @@ static enum coretype get_core_type(struct crash_elf_info *elf_info,
 static int cmdline_add_memmap_acpi(char *cmdline, unsigned long start,
 					unsigned long end)
 {
-	int cmdlen, len, align = 1024;
+	int align = 1024;
 	unsigned long startk, endk;
-	char str_mmap[256], str_tmp[20];
 
 	if (!(end - start))
 		return 0;
 
 	startk = start/1024;
 	endk = (end + align - 1)/1024;
-	strcpy (str_mmap, " memmap=");
-	ultoa((endk - startk), str_tmp);
-	strcat (str_mmap, str_tmp);
-	strcat (str_mmap, "K#");
-	ultoa(startk, str_tmp);
-	strcat (str_mmap, str_tmp);
-	strcat (str_mmap, "K");
-	len = strlen(str_mmap);
-	cmdlen = strlen(cmdline) + len;
-	if (cmdlen > (COMMAND_LINE_SIZE - 1))
-		die("Command line overflow\n");
-	strcat(cmdline, str_mmap);
+	cmdline_add_memmap_internal(cmdline, startk, endk, RANGE_ACPI);
 
 	dbgprintf("Command line after adding acpi memmap\n");
 	dbgprintf("%s\n", cmdline);
@@ -902,7 +804,7 @@ int load_crashdump_segments(struct kexec_info *info, char* mod_cmdline,
 {
 	void *tmp;
 	unsigned long sz, bufsz, memsz, elfcorehdr;
-	int nr_ranges, align = 1024, i;
+	int nr_ranges = 0, align = 1024, i;
 	struct memory_range *mem_range, *memmap_p;
 	struct crash_elf_info elf_info;
 	unsigned kexec_arch;
@@ -975,18 +877,19 @@ int load_crashdump_segments(struct kexec_info *info, char* mod_cmdline,
 		return -1;
 
 	/* Memory regions which panic kernel can safely use to boot into */
-	sz = (sizeof(struct memory_range) * (KEXEC_MAX_SEGMENTS + 1));
+	sz = (sizeof(struct memory_range) * CRASH_MAX_MEMMAP_NR);
 	memmap_p = xmalloc(sz);
 	memset(memmap_p, 0, sz);
 	add_memmap(memmap_p, info->backup_src_start, info->backup_src_size);
-	sz = crash_reserved_mem.end - crash_reserved_mem.start +1;
-	if (add_memmap(memmap_p, crash_reserved_mem.start, sz) < 0) {
-		return ENOCRASHKERNEL;
+	for (i = 0; i < crash_reserved_mem_nr; i++) {
+		sz = crash_reserved_mem[i].end - crash_reserved_mem[i].start +1;
+		if (add_memmap(memmap_p, crash_reserved_mem[i].start, sz) < 0)
+			return ENOCRASHKERNEL;
 	}
 
 	/* Create a backup region segment to store backup data*/
 	if (!(info->kexec_flags & KEXEC_PRESERVE_CONTEXT)) {
-		sz = (info->backup_src_size + align) & ~(align - 1);
+		sz = _ALIGN(info->backup_src_size, align);
 		tmp = xmalloc(sz);
 		memset(tmp, 0, sz);
 		info->backup_start = add_buffer(info, tmp, sz, sz, align,
@@ -1048,16 +951,62 @@ int load_crashdump_segments(struct kexec_info *info, char* mod_cmdline,
 	return 0;
 }
 
+int get_max_crash_kernel_limit(uint64_t *start, uint64_t *end)
+{
+	int i, idx = -1;
+	unsigned long sz_max = 0, sz;
+
+	if (!crash_reserved_mem_nr)
+		return -1;
+
+	for (i = crash_reserved_mem_nr - 1; i >= 0; i--) {
+		sz = crash_reserved_mem[i].end - crash_reserved_mem[i].start +1;
+		if (sz <= sz_max)
+			continue;
+		sz_max = sz;
+		idx = i;
+	}
+
+	*start = crash_reserved_mem[idx].start;
+	*end = crash_reserved_mem[idx].end;
+
+	return 0;
+}
+
+static int crashkernel_mem_callback(void *UNUSED(data), int nr,
+                                          char *UNUSED(str),
+                                          unsigned long base,
+                                          unsigned long length)
+{
+	if (nr >= CRASH_RESERVED_MEM_NR)
+		return 1;
+
+	crash_reserved_mem[nr].start = base;
+	crash_reserved_mem[nr].end   = base + length - 1;
+	crash_reserved_mem[nr].type  = RANGE_RAM;
+	return 0;
+}
+
 int is_crashkernel_mem_reserved(void)
 {
-	uint64_t start, end;
+	int ret;
 
-	if (parse_iomem_single("Crash kernel\n", &start, &end) || start == end)
-		return 0;
+	if (xen_present()) {
+		uint64_t start, end;
 
-	crash_reserved_mem.start = start;
-	crash_reserved_mem.end = end;
-	crash_reserved_mem.type = RANGE_RAM;
+		ret = xen_get_crashkernel_region(&start, &end);
+		if (ret < 0)
+			return 0;
 
-	return 1;
+		crash_reserved_mem[0].start = start;
+		crash_reserved_mem[0].end   = end;
+		crash_reserved_mem[0].type  = RANGE_RAM;
+		crash_reserved_mem_nr = 1;
+	} else {
+		ret = kexec_iomem_for_each_line("Crash kernel\n",
+						crashkernel_mem_callback, NULL);
+		crash_reserved_mem_nr = ret;
+	}
+
+	return !!crash_reserved_mem_nr;
 }

@@ -74,7 +74,7 @@ void arch_update_purgatory(struct kexec_info *UNUSED(info))
 
 int is_crashkernel_mem_reserved(void)
 {
-	return 1;
+	return 0;
 }
 
 unsigned long virt_to_phys(unsigned long addr)
@@ -83,7 +83,7 @@ unsigned long virt_to_phys(unsigned long addr)
 }
 
 /*
- * add_segment() should convert base to a physical address on superh,
+ * add_segment() should convert base to a physical address on cris,
  * while the default is just to work with base as is */
 void add_segment(struct kexec_info *info, const void *buf, size_t bufsz,
                  unsigned long base, size_t memsz)
@@ -92,7 +92,7 @@ void add_segment(struct kexec_info *info, const void *buf, size_t bufsz,
 }
 
 /*
- * add_buffer() should convert base to a physical address on superh,
+ * add_buffer() should convert base to a physical address on cris,
  * while the default is just to work with base as is */
 unsigned long add_buffer(struct kexec_info *info, const void *buf,
                          unsigned long bufsz, unsigned long memsz,

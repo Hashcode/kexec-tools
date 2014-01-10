@@ -117,6 +117,8 @@ int do_bzImage_load(struct kexec_info *info,
 	unsigned long kernel32_load_addr;
 	char *modified_cmdline;
 	unsigned long cmdline_end;
+	unsigned long kern16_size_needed;
+	unsigned long heap_size = 0;
 
 	/*
 	 * Find out about the file I am about to load.
@@ -194,7 +196,7 @@ int do_bzImage_load(struct kexec_info *info,
 	}
 
 	/* Load the trampoline.  This must load at a higher address
-	 * the the argument/parameter segment or the kernel will stomp
+	 * than the argument/parameter segment or the kernel will stomp
 	 * it's gdt.
 	 *
 	 * x86_64 purgatory code has got relocations type R_X86_64_32S
@@ -208,10 +210,43 @@ int do_bzImage_load(struct kexec_info *info,
 		elf_rel_build_load(info, &info->rhdr, purgatory, purgatory_size,
 					0x3000, 640*1024, -1, 0);
 	dbgprintf("Loaded purgatory at addr 0x%lx\n", info->rhdr.rel_addr);
+
 	/* The argument/parameter segment */
-	setup_size = kern16_size + command_line_len + PURGATORY_CMDLINE_SIZE;
+	if (real_mode_entry) {
+		/* need to include size for bss and heap etc */
+		if (setup_header.protocol_version >= 0x0201)
+			kern16_size_needed = setup_header.heap_end_ptr;
+		else
+			kern16_size_needed = kern16_size + 8192; /* bss */
+		if (kern16_size_needed < kern16_size)
+			kern16_size_needed = kern16_size;
+		if (kern16_size_needed > 0xfffc)
+			die("kern16_size_needed is more then 64k\n");
+		heap_size = 0xfffc - kern16_size_needed; /* less 64k */
+		heap_size = _ALIGN_DOWN(heap_size, 0x200);
+		kern16_size_needed += heap_size;
+	} else {
+		kern16_size_needed = kern16_size;
+		/* need to bigger than size of struct bootparams */
+		if (kern16_size_needed < 4096)
+			kern16_size_needed = 4096;
+	}
+	setup_size = kern16_size_needed + command_line_len +
+			 PURGATORY_CMDLINE_SIZE;
 	real_mode = xmalloc(setup_size);
-	memcpy(real_mode, kernel, kern16_size);
+	memset(real_mode, 0, setup_size);
+	if (!real_mode_entry) {
+		unsigned long setup_header_size = kernel[0x201] + 0x202 - 0x1f1;
+
+		/* only copy setup_header */
+		if (setup_header_size > 0x7f)
+			setup_header_size = 0x7f;
+		memcpy((unsigned char *)real_mode + 0x1f1, kernel + 0x1f1,
+			setup_header_size);
+	} else {
+		/* copy setup code and setup_header */
+		memcpy(real_mode, kernel, kern16_size);
+	}
 
 	if (info->kexec_flags & (KEXEC_ON_CRASH | KEXEC_PRESERVE_CONTEXT)) {
 		/* If using bzImage for capture kernel, then we will not be
@@ -245,10 +280,8 @@ int do_bzImage_load(struct kexec_info *info,
 		unsigned long kern_align = real_mode->kernel_alignment;
 		unsigned long kernel32_max_addr = DEFAULT_BZIMAGE_ADDR_MAX;
 
-		if (real_mode->protocol_version >= 0x0203) {
-			if (kernel32_max_addr > real_mode->initrd_addr_max)
-				kernel32_max_addr = real_mode->initrd_addr_max;
-		}
+		if (kernel32_max_addr > real_mode->initrd_addr_max)
+			kernel32_max_addr = real_mode->initrd_addr_max;
 
 		kernel32_load_addr = add_buffer(info, kernel + kern16_size,
 						size, size, kern_align,
@@ -265,14 +298,20 @@ int do_bzImage_load(struct kexec_info *info,
 
 	/* Tell the kernel what is going on */
 	setup_linux_bootloader_parameters(info, real_mode, setup_base,
-		kern16_size, command_line, command_line_len,
+		kern16_size_needed, command_line, command_line_len,
 		initrd, initrd_len);
 
-	/* Get the initial register values */
-	elf_rel_get_symbol(&info->rhdr, "entry16_regs", &regs16, sizeof(regs16));
-	elf_rel_get_symbol(&info->rhdr, "entry32_regs", &regs32, sizeof(regs32));
-	/*
+	if (real_mode_entry && real_mode->protocol_version >= 0x0201) {
+		real_mode->loader_flags |= 0x80; /* CAN_USE_HEAP */
+		real_mode->heap_end_ptr += heap_size - 0x200; /*stack*/
+	}
 
+	/* Get the initial register values */
+	if (real_mode_entry)
+		elf_rel_get_symbol(&info->rhdr, "entry16_regs",
+					 &regs16, sizeof(regs16));
+
+	/*
 	 * Initialize the 32bit start information.
 	 */
 	regs32.eax = 0; /* unused */
@@ -288,16 +327,18 @@ int do_bzImage_load(struct kexec_info *info,
 	/*
 	 * Initialize the 16bit start information.
 	 */
-	regs16.ds = regs16.es = regs16.fs = regs16.gs = setup_base >> 4;
-	regs16.cs = regs16.ds + 0x20;
-	regs16.ip = 0;
-	/* XXX: Documentation/i386/boot.txt says 'ss' must equal 'ds' */
-	regs16.ss = (elf_rel_get_addr(&info->rhdr, "stack_end") - 64*1024) >> 4;
-	/* XXX: Documentation/i386/boot.txt says 'sp' must equal heap_end */
-	regs16.esp = 0xFFFC;
 	if (real_mode_entry) {
+		regs16.ds = regs16.es = regs16.fs = regs16.gs = setup_base >> 4;
+		regs16.cs = regs16.ds + 0x20;
+		regs16.ip = 0;
+		/* XXX: Documentation/i386/boot.txt says 'ss' must equal 'ds' */
+		regs16.ss = (elf_rel_get_addr(&info->rhdr, "stack_end") - 64*1024) >> 4;
+		/* XXX: Documentation/i386/boot.txt says 'sp' must equal heap_end */
+		regs16.esp = 0xFFFC;
+
 		printf("Starting the kernel in real mode\n");
 		regs32.eip = elf_rel_get_addr(&info->rhdr, "entry16");
+		real_mode->kernel_start = kernel32_load_addr;
 	}
 	if (real_mode_entry && kexec_debug) {
 		unsigned long entry16_debug, pre32, first32;
@@ -317,16 +358,20 @@ int do_bzImage_load(struct kexec_info *info,
 	
 		regs32.eip = entry16_debug;
 	}
-	elf_rel_set_symbol(&info->rhdr, "entry16_regs", &regs16, sizeof(regs16));
-	elf_rel_set_symbol(&info->rhdr, "entry16_debug_regs", &regs16, sizeof(regs16));
+	if (real_mode_entry) {
+		elf_rel_set_symbol(&info->rhdr, "entry16_regs",
+					 &regs16, sizeof(regs16));
+		elf_rel_set_symbol(&info->rhdr, "entry16_debug_regs",
+					 &regs16, sizeof(regs16));
+	}
 	elf_rel_set_symbol(&info->rhdr, "entry32_regs", &regs32, sizeof(regs32));
-	cmdline_end = setup_base + kern16_size + command_line_len - 1;
+	cmdline_end = setup_base + kern16_size_needed + command_line_len - 1;
 	elf_rel_set_symbol(&info->rhdr, "cmdline_end", &cmdline_end,
 			   sizeof(unsigned long));
 
 	/* Fill in the information BIOS calls would normally provide. */
 	if (!real_mode_entry) {
-		setup_linux_system_parameters(real_mode, info->kexec_flags);
+		setup_linux_system_parameters(info, real_mode);
 	}
 
 	return 0;
@@ -336,6 +381,7 @@ int bzImage_load(int argc, char **argv, const char *buf, off_t len,
 	struct kexec_info *info)
 {
 	char *command_line = NULL;
+	char *tmp_cmdline = NULL;
 	const char *ramdisk, *append = NULL;
 	char *ramdisk_buf;
 	off_t ramdisk_length;
@@ -367,15 +413,11 @@ int bzImage_load(int argc, char **argv, const char *buf, off_t len,
 			if (opt < OPT_ARCH_MAX) {
 				break;
 			}
-		case '?':
-			usage();
-			return -1;
-			break;
 		case OPT_APPEND:
 			append = optarg;
 			break;
 		case OPT_REUSE_CMDLINE:
-			command_line = get_command_line();
+			tmp_cmdline = get_command_line();
 			break;
 		case OPT_RAMDISK:
 			ramdisk = optarg;
@@ -385,10 +427,16 @@ int bzImage_load(int argc, char **argv, const char *buf, off_t len,
 			break;
 		}
 	}
-	command_line = concat_cmdline(command_line, append);
+	command_line = concat_cmdline(tmp_cmdline, append);
+	if (tmp_cmdline) {
+		free(tmp_cmdline);
+	}
 	command_line_len = 0;
 	if (command_line) {
 		command_line_len = strlen(command_line) +1;
+	} else {
+	    command_line = strdup("\0");
+	    command_line_len = 1;
 	}
 	ramdisk_buf = 0;
 	if (ramdisk) {

@@ -40,15 +40,7 @@
 #include "kexec-x86.h"
 
 #ifdef HAVE_LIBXENCTRL
-#ifdef HAVE_XC_GET_MACHINE_MEMORY_MAP
 #include <xenctrl.h>
-#else
-#define __XEN_TOOLS__	1
-#include <x86/x86-linux.h>
-#include <xen/xen.h>
-#include <xen/memory.h>
-#include <xen/sys/privcmd.h>
-#endif /* HAVE_XC_GET_MACHINE_MEMORY_MAP */
 #endif /* HAVE_LIBXENCTRL */
 
 static struct memory_range memory_range[MAX_MEMORY_RANGES];
@@ -88,10 +80,9 @@ static int get_memory_ranges_proc_iomem(struct memory_range **range, int *ranges
 			continue;
 		str = line + consumed;
 		end = end + 1;
-#if 0
-		printf("%016Lx-%016Lx : %s",
-			start, end, str);
-#endif
+
+		dbgprintf("%016Lx-%016Lx : %s", start, end, str);
+
 		if (memcmp(str, "System RAM\n", 11) == 0) {
 			type = RANGE_RAM;
 		}
@@ -110,10 +101,9 @@ static int get_memory_ranges_proc_iomem(struct memory_range **range, int *ranges
 		memory_range[memory_ranges].start = start;
 		memory_range[memory_ranges].end = end;
 		memory_range[memory_ranges].type = type;
-#if 0
-		printf("%016Lx-%016Lx : %x\n",
-			start, end, type);
-#endif
+
+		dbgprintf("%016Lx-%016Lx : %x\n", start, end, type);
+
 		memory_ranges++;
 	}
 	fclose(fp);
@@ -175,33 +165,19 @@ unsigned xen_e820_to_kexec_type(uint32_t type)
  *
  * @return 0 on success, any other value on failure.
  */
-#ifdef HAVE_XC_GET_MACHINE_MEMORY_MAP
 static int get_memory_ranges_xen(struct memory_range **range, int *ranges)
 {
 	int rc, ret = -1;
 	struct e820entry e820entries[MAX_MEMORY_RANGES];
 	unsigned int i;
-#ifdef XENCTRL_HAS_XC_INTERFACE
 	xc_interface *xc;
-#else
-	int xc;
-#endif
 
-#ifdef XENCTRL_HAS_XC_INTERFACE
 	xc = xc_interface_open(NULL, NULL, 0);
 
 	if (!xc) {
 		fprintf(stderr, "%s: Failed to open Xen control interface\n", __func__);
-		goto err;
+		return -1;
 	}
-#else
-	xc = xc_interface_open();
-
-	if (xc == -1) {
-		fprintf(stderr, "%s: Failed to open Xen control interface\n", __func__);
-		goto err;
-	}
-#endif
 
 	rc = xc_get_machine_memory_map(xc, e820entries, MAX_MEMORY_RANGES);
 
@@ -228,87 +204,6 @@ err:
 
 	return ret;
 }
-#else
-static int get_memory_ranges_xen(struct memory_range **range, int *ranges)
-{
-	int fd, rc, ret = -1;
-	privcmd_hypercall_t hypercall;
-	struct e820entry *e820entries = NULL;
-	struct xen_memory_map *xen_memory_map = NULL;
-	unsigned int i;
-
-	fd = open("/proc/xen/privcmd", O_RDWR);
-
-	if (fd == -1) {
-		fprintf(stderr, "%s: open(/proc/xen/privcmd): %m\n", __func__);
-		goto err;
-	}
-
-	rc = posix_memalign((void **)&e820entries, sysconf(_SC_PAGESIZE),
-			    sizeof(struct e820entry) * MAX_MEMORY_RANGES);
-
-	if (rc) {
-		fprintf(stderr, "%s: posix_memalign(e820entries): %s\n", __func__, strerror(rc));
-		e820entries = NULL;
-		goto err;
-	}
-
-	rc = posix_memalign((void **)&xen_memory_map, sysconf(_SC_PAGESIZE),
-			    sizeof(struct xen_memory_map));
-
-	if (rc) {
-		fprintf(stderr, "%s: posix_memalign(xen_memory_map): %s\n", __func__, strerror(rc));
-		xen_memory_map = NULL;
-		goto err;
-	}
-
-	if (mlock(e820entries, sizeof(struct e820entry) * MAX_MEMORY_RANGES) == -1) {
-		fprintf(stderr, "%s: mlock(e820entries): %m\n", __func__);
-		goto err;
-	}
-
-	if (mlock(xen_memory_map, sizeof(struct xen_memory_map)) == -1) {
-		fprintf(stderr, "%s: mlock(xen_memory_map): %m\n", __func__);
-		goto err;
-	}
-
-	xen_memory_map->nr_entries = MAX_MEMORY_RANGES;
-	set_xen_guest_handle(xen_memory_map->buffer, e820entries);
-
-	hypercall.op = __HYPERVISOR_memory_op;
-	hypercall.arg[0] = XENMEM_machine_memory_map;
-	hypercall.arg[1] = (__u64)xen_memory_map;
-
-	rc = ioctl(fd, IOCTL_PRIVCMD_HYPERCALL, &hypercall);
-
-	if (rc == -1) {
-		fprintf(stderr, "%s: ioctl(IOCTL_PRIVCMD_HYPERCALL): %m\n", __func__);
-		goto err;
-	}
-
-	for (i = 0; i < xen_memory_map->nr_entries; ++i) {
-		memory_range[i].start = e820entries[i].addr;
-		memory_range[i].end = e820entries[i].addr + e820entries[i].size;
-		memory_range[i].type = xen_e820_to_kexec_type(e820entries[i].type);
-	}
-
-	qsort(memory_range, xen_memory_map->nr_entries, sizeof(struct memory_range), compare_ranges);
-
-	*range = memory_range;
-	*ranges = xen_memory_map->nr_entries;
-
-	ret = 0;
-
-err:
-	munlock(xen_memory_map, sizeof(struct xen_memory_map));
-	munlock(e820entries, sizeof(struct e820entry) * MAX_MEMORY_RANGES);
-	free(xen_memory_map);
-	free(e820entries);
-	close(fd);
-
-	return ret;
-}
-#endif /* HAVE_XC_GET_MACHINE_MEMORY_MAP */
 #else
 static int get_memory_ranges_xen(struct memory_range **range, int *ranges)
 {
@@ -467,9 +362,9 @@ int get_memory_ranges(struct memory_range **range, int *ranges,
 	    !(kexec_flags & KEXEC_PRESERVE_CONTEXT)) {
 		uint64_t start, end;
 
-		ret = parse_iomem_single("Crash kernel\n", &start, &end);
+		ret = get_max_crash_kernel_limit(&start, &end);
 		if (ret != 0) {
-			fprintf(stderr, "parse_iomem_single failed.\n");
+			fprintf(stderr, "get_max_crash_kernel_limit failed.\n");
 			return -1;
 		}
 
@@ -479,17 +374,11 @@ int get_memory_ranges(struct memory_range **range, int *ranges,
 			mem_max = end;
 	}
 
-	/* just set 0 to 1 to enable printing for debugging */
-#if 0
-	{
-		int i;
-		printf("MEMORY RANGES\n");
-		for (i = 0; i < *ranges; i++) {
-			printf("%016Lx-%016Lx (%d)\n", (*range)[i].start,
-				(*range)[i].end, (*range)[i].type);
-		}
+	dbgprintf("MEMORY RANGES\n");
+	for (i = 0; i < *ranges; i++) {
+		dbgprintf("%016Lx-%016Lx (%d)\n", (*range)[i].start,
+			  (*range)[i].end, (*range)[i].type);
 	}
-#endif
 
 	return ret;
 }

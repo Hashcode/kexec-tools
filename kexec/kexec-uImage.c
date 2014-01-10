@@ -16,6 +16,14 @@
  * Basic uImage loader. Not rocket science.
  */
 
+/*
+ * Returns the image type if everything goes well. This would
+ * allow the user to decide if the image is of their interest.
+ *
+ * Returns -1 on a corrupted image
+ *
+ * Returns 0 if this is not a uImage
+ */
 int uImage_probe(const unsigned char *buf, off_t len, unsigned int arch)
 {
 	struct image_header header;
@@ -29,7 +37,7 @@ int uImage_probe(const unsigned char *buf, off_t len, unsigned int arch)
 
 	memcpy(&header, buf, sizeof(header));
 	if (be32_to_cpu(header.ih_magic) != IH_MAGIC)
-		return -1;
+		return 0;
 #ifdef HAVE_LIBZ
 	hcrc = be32_to_cpu(header.ih_hcrc);
 	header.ih_hcrc = 0;
@@ -42,6 +50,8 @@ int uImage_probe(const unsigned char *buf, off_t len, unsigned int arch)
 	switch (header.ih_type) {
 	case IH_TYPE_KERNEL:
 	case IH_TYPE_KERNEL_NOLOAD:
+		break;
+	case IH_TYPE_RAMDISK:
 		break;
 	default:
 		printf("uImage type %d unsupported\n", header.ih_type);
@@ -78,13 +88,42 @@ int uImage_probe(const unsigned char *buf, off_t len, unsigned int arch)
 #ifdef HAVE_LIBZ
 	crc = crc32(0, (void *)buf + sizeof(header), be32_to_cpu(header.ih_size));
 	if (crc != be32_to_cpu(header.ih_dcrc)) {
-		printf("The data CRC does not match. Computed: %08x "
+		printf("uImage: The data CRC does not match. Computed: %08x "
 				"expected %08x\n", crc,
 				be32_to_cpu(header.ih_dcrc));
 		return -1;
 	}
 #endif
-	return 0;
+	return (int)header.ih_type;
+}
+
+/* 
+ * To conform to the 'probe' routine in file_type struct,
+ * we return :
+ *  0		- If the image is valid 'type' image.
+ *
+ *  Now, we have to pass on the 'errors' in the image. So,
+ *
+ * -1		- If the image is corrupted.
+ *  1		- If the image is not a uImage.
+ */
+
+int uImage_probe_kernel(const unsigned char *buf, off_t len, unsigned int arch)
+{
+	int type = uImage_probe(buf, len, arch);
+	if (type < 0)
+		return -1;
+
+	return !(type == IH_TYPE_KERNEL || type == IH_TYPE_KERNEL_NOLOAD);
+}
+
+int uImage_probe_ramdisk(const unsigned char *buf, off_t len, unsigned int arch)
+{
+	int type = uImage_probe(buf, len, arch);
+
+	if (type < 0)
+		return -1;
+	return !(type == IH_TYPE_RAMDISK);
 }
 
 #ifdef HAVE_LIBZ
@@ -196,19 +235,39 @@ int uImage_load(const unsigned char *buf, off_t len, struct Image_info *image)
 {
 	const struct image_header *header = (const struct image_header *)buf;
 	const unsigned char *img_buf = buf + sizeof(struct image_header);
-	off_t img_len = len - sizeof(struct image_header);
+	off_t img_len = header->ih_size;
+
+	/*
+	 * Prevent loading a modified image.
+	 * CRC check is perfomed only when zlib is compiled
+	 * in. This check will help us to detect
+	 * size related vulnerabilities. 	
+	 */
+ 	if (img_len != (len - sizeof(struct image_header))) {
+		printf("Image size doesn't match the header\n");
+		return -1;
+	}
 
 	image->base = cpu_to_be32(header->ih_load);
 	image->ep = cpu_to_be32(header->ih_ep);
 	switch (header->ih_comp) {
 	case IH_COMP_NONE:
 		image->buf = img_buf;
-		image->len = len;
+		image->len = img_len;
 		return 0;
 		break;
 
 	case IH_COMP_GZIP:
-		return uImage_gz_load(img_buf, img_len, image);
+		/*
+		 * uboot doesn't decompress the RAMDISK images.
+		 * Comply to the uboot behaviour.
+		 */
+		if (header->ih_type == IH_TYPE_RAMDISK) {
+			image->buf = img_buf;
+			image->len = img_len;
+			return 0;
+		} else
+			return uImage_gz_load(img_buf, img_len, image);
 		break;
 
 	default:

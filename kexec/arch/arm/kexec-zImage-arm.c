@@ -25,6 +25,7 @@
 
 off_t initrd_base = 0, initrd_size = 0;
 char *atags_file = NULL;
+unsigned int kexec_arm_image_size = 0;
 
 struct tag_header {
 	uint32_t size;
@@ -242,6 +243,7 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 	off_t dtb_length;
 	char *dtb_file;
 	off_t dtb_offset;
+	char *end;
 
 	/* See options.h -- add any more there, too. */
 	static const struct option options[] = {
@@ -252,6 +254,7 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 		{ "ramdisk",		1, 0, OPT_RAMDISK },
 		{ "dtb",		1, 0, OPT_DTB },
 		{ "atags",		0, 0, OPT_ATAGS },
+		{ "image-size",		1, 0, OPT_IMAGE_SIZE },
 		{ "atags-file",		1, 0, OPT_ATAGS },
 		{ 0, 			0, 0, 0 },
 	};
@@ -274,9 +277,6 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 			if (opt < OPT_ARCH_MAX) {
 				break;
 			}
-		case '?':
-			usage();
-			return -1;
 		case OPT_APPEND:
 			command_line = optarg;
 			break;
@@ -288,6 +288,9 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 			break;
 		case OPT_ATAGS:
 			use_atags = 1;
+			break;
+		case OPT_IMAGE_SIZE:
+			kexec_arm_image_size = strtoul(optarg, &end, 0);
 			break;
 		case OPT_ATAGS_FILE:
 			atags_file = optarg;
@@ -356,10 +359,16 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 
 	printf("Kernel segment stats: %lx (%ld)\n", base, len);
 
-	/* assume the maximum kernel compression ratio is 4,
-	 * and just to be safe, place ramdisk after that
-	 */
-	initrd_base = base + len * 4;
+	if (kexec_arm_image_size) {
+		/* If the image size was passed as command line argument,
+		 * use that value for determining the address for initrd,
+		 * atags and dtb images. page-align the given length.*/
+		initrd_base = base + _ALIGN(kexec_arm_image_size, 4096);
+	} else {
+		/* Otherwise, assume the maximum kernel compression ratio
+		 * is 4, and just to be safe, place ramdisk after that */
+		initrd_base = base + len * 4;
+	}
 
 	if (use_atags) {
 		/*
@@ -375,16 +384,45 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 		 */
 		if (dtb_file) {
 			dtb_buf = slurp_file(dtb_file, &dtb_length);
+
+			if (fdt_check_header(dtb_buf) != 0) {
+				fprintf(stderr, "Invalid FDT buffer.\n");
+				return -1;
+			}
+
+			if (command_line) {
+				const char *node_name = "/chosen";
+				const char *prop_name = "bootargs";
+				int off;
+
+				dtb_length = fdt_totalsize(dtb_buf) + 1024 +
+					strlen(command_line);
+				dtb_buf = xrealloc(dtb_buf, dtb_length);
+				fdt_set_totalsize(dtb_buf, dtb_length);
+
+				/* check if a /choosen subnode already exists */
+				off = fdt_path_offset(dtb_buf, node_name);
+
+				if (off == -FDT_ERR_NOTFOUND)
+					off = fdt_add_subnode(dtb_buf, off, node_name);
+
+				if (off < 0) {
+					fprintf(stderr, "FDT: Error adding %s node.\n", node_name);
+					return -1;
+				}
+
+				if (fdt_setprop(dtb_buf, off, prop_name,
+						command_line, strlen(command_line) + 1) != 0) {
+					fprintf(stderr, "FDT: Error setting %s/%s property.\n",
+						node_name, prop_name);
+					return -1;
+				}
+			}
 		} else {
 			/*
 			 * Extract the DTB from /proc/device-tree.
 			 */
 			create_flatten_tree(&dtb_buf, &dtb_length, command_line);
-		}
-
-		if (fdt_check_header(dtb_buf) != 0) {
-			fprintf(stderr, "Invalid FDT buffer.\n");
-			return -1;
 		}
 
 		if (base + atag_offset + dtb_length > base + offset) {
@@ -401,7 +439,7 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 		 * align it.
 		 */
 		dtb_offset = initrd_base + initrd_size + getpagesize();
-		dtb_offset &= ~(getpagesize() - 1);
+		dtb_offset = _ALIGN_DOWN(dtb_offset, getpagesize());
 
 		add_segment(info, dtb_buf, dtb_length,
 		            dtb_offset, dtb_length);

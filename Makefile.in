@@ -22,6 +22,7 @@ includedir	= @includedir@
 
 # The target architecture
 ARCH		= @ARCH@
+SUBARCH		= @SUBARCH@
 OBJDIR		= @OBJDIR@
 target		= @target@
 host		= @host@
@@ -45,10 +46,10 @@ TARGET_CFLAGS	= @TARGET_CFLAGS@
 # Base compiler flags. These are extended by the subcomponent-Makefiles
 # where necessary.
 CPPFLAGS	= @CPPFLAGS@ -I$(srcdir)/include -I$(srcdir)/util_lib/include \
-			-Iinclude/
+			-Iinclude/ $($(ARCH)_CPPFLAGS)
 CFLAGS		= @CFLAGS@ -fno-strict-aliasing -Wall -Wstrict-prototypes
 PURGATORY_EXTRA_CFLAGS = @PURGATORY_EXTRA_CFLAGS@
-ASFLAGS		= @ASFLAGS@
+ASFLAGS		= @ASFLAGS@ $($(ARCH)_ASFLAGS)
 LDFLAGS		= @LDFLAGS@
 LIBS		= @LIBS@
 
@@ -64,6 +65,7 @@ SED		= @SED@
 FIND		= @FIND@
 XARGS		= @XARGS@
 DIRNAME		= @DIRNAME@
+STRIP		= @STRIP@
 
 
 pkgdatadir = $(datadir)/$(PACKAGE_NAME)
@@ -219,6 +221,7 @@ echo::
 	@echo CC=$(CC)
 	@echo AR=$(AR)
 	@echo LD=$(LD)
+	@echo STRIP=$(STRIP)
 
 clean:
 	$(RM) -f $(clean)

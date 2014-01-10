@@ -21,7 +21,6 @@
 #include "../../kexec-syscall.h"
 #include "../../kexec/crashdump.h"
 #include "kexec-s390.h"
-#include "elf.h"
 #include <arch/options.h>
 
 static uint64_t crash_base, crash_end;
@@ -73,10 +72,6 @@ image_s390_load(int argc, char **argv, const char *kernel_buf,
 
 	while ((opt = getopt_long(argc,argv,short_options,options,0)) != -1) {
 		switch(opt) {
-		case '?':
-			usage();
-			return -1;
-			break;
 		case OPT_APPEND:
 			if (command_line_add(optarg))
 				return -1;
@@ -112,7 +107,7 @@ image_s390_load(int argc, char **argv, const char *kernel_buf,
 			return -1;
 		}
 		ramdisk_origin = MAX(RAMDISK_ORIGIN_ADDR, kernel_size);
-		ramdisk_origin = ALIGN_UP(ramdisk_origin, 0x100000);
+		ramdisk_origin = _ALIGN_UP(ramdisk_origin, 0x100000);
 		add_segment_check(info, rd_buffer, ramdisk_len,
 				  ramdisk_origin, ramdisk_len);
 	}

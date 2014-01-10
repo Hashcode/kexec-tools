@@ -35,12 +35,11 @@ extern struct arch_options_t arch_options;
 #endif
 
 #define KDUMP_BACKUP_LIMIT	BACKUP_SRC_SIZE
-#define _ALIGN_UP(addr, size)	(((addr)+((size)-1))&(~((size)-1)))
-#define _ALIGN_DOWN(addr, size)	((addr)&(~((size)-1)))
 
 extern unsigned long long crash_base;
 extern unsigned long long crash_size;
 extern unsigned int rtas_base;
 extern unsigned int rtas_size;
+extern uint64_t memory_limit;
 
 #endif /* CRASHDUMP_POWERPC_H */

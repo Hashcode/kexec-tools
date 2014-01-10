@@ -46,9 +46,39 @@ void uImage_ppc_usage(void)
 	);
 }
 
+/*
+ * Load the ramdisk into buffer.
+ *  If the supplied image is in uImage format use
+ *  uImage_load() to read the payload from the image.
+ */
+char *slurp_ramdisk_ppc(const char *filename, off_t *r_size)
+{
+	struct Image_info img;
+	off_t size;
+	const unsigned char *buf = slurp_file(filename, &size);
+	int rc;
+
+	/* Check if this is a uImage RAMDisk */
+	if (!buf)
+		return buf;
+	rc = uImage_probe_ramdisk(buf, size, IH_ARCH_PPC); 
+	if (rc < 0)
+		die("uImage: Corrupted ramdisk file %s\n", filename);
+	else if (rc == 0) {
+		if (uImage_load(buf, size, &img) != 0)
+			die("uImage: Reading %ld bytes from %s failed\n",
+				size, filename);
+		buf = img.buf;
+		size = img.len;
+	}
+
+	*r_size = size;
+	return buf;
+}
+	
 int uImage_ppc_probe(const char *buf, off_t len)
 {
-	return uImage_probe(buf, len, IH_ARCH_PPC);
+	return uImage_probe_kernel(buf, len, IH_ARCH_PPC);
 }
 
 static int ppc_load_bare_bits(int argc, char **argv, const char *buf,
@@ -56,7 +86,8 @@ static int ppc_load_bare_bits(int argc, char **argv, const char *buf,
 		unsigned int ep)
 {
 	char *command_line, *cmdline_buf, *crash_cmdline;
-	int command_line_len;
+	char *tmp_cmdline;
+	int command_line_len, crash_cmdline_len;
 	char *dtb;
 	unsigned int addr;
 	unsigned long dtb_addr;
@@ -65,16 +96,18 @@ static int ppc_load_bare_bits(int argc, char **argv, const char *buf,
 	char *fixup_nodes[FIXUP_ENTRYS + 1];
 	int cur_fixup = 0;
 	int opt;
-	int ret;
+	int ret = 0;
 	char *seg_buf = NULL;
 	off_t seg_size = 0;
 	unsigned long long hole_addr;
 	unsigned long max_addr;
 	char *blob_buf = NULL;
 	off_t blob_size = 0;
+	char *error_msg = NULL;
 
 	cmdline_buf = NULL;
 	command_line = NULL;
+	tmp_cmdline = NULL;
 	dtb = NULL;
 	max_addr = LONG_MAX;
 
@@ -85,11 +118,8 @@ static int ppc_load_bare_bits(int argc, char **argv, const char *buf,
 			if (opt < OPT_ARCH_MAX) {
 				break;
 			}
-		case '?':
-			usage();
-			return -1;
 		case OPT_APPEND:
-			command_line = optarg;
+			tmp_cmdline = optarg;
 			break;
 
 		case OPT_RAMDISK:
@@ -102,8 +132,7 @@ static int ppc_load_bare_bits(int argc, char **argv, const char *buf,
 
 		case OPT_NODES:
 			if (cur_fixup >= FIXUP_ENTRYS) {
-				fprintf(stderr, "The number of entries for the fixup is too large\n");
-				exit(1);
+				die("The number of entries for the fixup is too large\n");
 			}
 			fixup_nodes[cur_fixup] = optarg;
 			cur_fixup++;
@@ -115,12 +144,12 @@ static int ppc_load_bare_bits(int argc, char **argv, const char *buf,
 		die("Can't specify --ramdisk or --initrd with --reuseinitrd\n");
 
 	command_line_len = 0;
-	if (command_line) {
-		command_line_len = strlen(command_line) + 1;
+	if (tmp_cmdline) {
+		command_line = tmp_cmdline;
 	} else {
 		command_line = get_command_line();
-		command_line_len = strlen(command_line) + 1;
 	}
+	command_line_len = strlen(command_line) + 1;
 
 	fixup_nodes[cur_fixup] = NULL;
 
@@ -130,36 +159,55 @@ static int ppc_load_bare_bits(int argc, char **argv, const char *buf,
 	 * allocated from memtop down towards zero so we should never get too
 	 * close to the bss :)
 	 */
-	ret = valid_memory_range(info, load_addr, load_addr + (len + (1 * 1024 * 1024)));
-	if (!ret) {
-		printf("Can't add kernel to addr 0x%08x len %ld\n",
-				load_addr, len + (1 * 1024 * 1024));
-		return -1;
+#define _1MiB	(1 * 1024 * 1024)
+
+	/*
+	 * If the provided load_addr cannot be allocated, find a new
+	 * area. Rebase the entry point based on the new load_addr.
+	 */
+	if (!valid_memory_range(info, load_addr, load_addr + (len + _1MiB))) {
+		int ep_offset = ep - load_addr;
+
+		load_addr = locate_hole(info, len + _1MiB, 0, 0, max_addr, 1);
+		if (load_addr == ULONG_MAX) {
+			printf("Can't allocate memory for kernel of len %ld\n",
+					len + _1MiB);
+			return -1;
+		}
+
+		ep = load_addr + ep_offset;
 	}
-	add_segment(info, buf, len, load_addr, len + (1 * 1024 * 1024));
+
+	add_segment(info, buf, len, load_addr, len + _1MiB);
+
 
 	if (info->kexec_flags & KEXEC_ON_CRASH) {
                 crash_cmdline = xmalloc(COMMAND_LINE_SIZE);
                 memset((void *)crash_cmdline, 0, COMMAND_LINE_SIZE);
-        } else
-                crash_cmdline = NULL;
-
-	if (info->kexec_flags & KEXEC_ON_CRASH) {
 		ret = load_crashdump_segments(info, crash_cmdline,
 						max_addr, 0);
 		if (ret < 0) {
-			return -1;
+			ret = -1;
+			goto out;
 		}
+		crash_cmdline_len = strlen(crash_cmdline);
+	} else {
+		crash_cmdline = NULL;
+		crash_cmdline_len = 0;
+	}
+
+	if (crash_cmdline_len + command_line_len + 1 > COMMAND_LINE_SIZE) {
+		printf("Kernel command line exceeds maximum possible length\n");
+		return -1;
 	}
 
 	cmdline_buf = xmalloc(COMMAND_LINE_SIZE);
 	memset((void *)cmdline_buf, 0, COMMAND_LINE_SIZE);
+
 	if (command_line)
-		strncat(cmdline_buf, command_line, command_line_len);
+		strcpy(cmdline_buf, command_line);
 	if (crash_cmdline)
-		strncat(cmdline_buf, crash_cmdline,
-			sizeof(crash_cmdline) -
-			strlen(crash_cmdline) - 1);
+		strncat(cmdline_buf, crash_cmdline, crash_cmdline_len);
 
 	elf_rel_build_load(info, &info->rhdr, (const char *)purgatory,
 				purgatory_size, 0, -1, -1, 0);
@@ -174,14 +222,16 @@ static int ppc_load_bare_bits(int argc, char **argv, const char *buf,
 		create_flatten_tree(info, (unsigned char **)&blob_buf,
 				(unsigned long *)&blob_size, cmdline_buf);
 	}
-	if (!blob_buf || !blob_size)
-		die("Device tree seems to be an empty file.\n");
+	if (!blob_buf || !blob_size) {
+		error_msg = "Device tree seems to be an empty file.\n";
+		goto out2;
+	}
 
 	/* initial fixup for device tree */
 	blob_buf = fixup_dtb_init(info, blob_buf, &blob_size, load_addr, &dtb_addr);
 
 	if (ramdisk) {
-		seg_buf = slurp_file(ramdisk, &seg_size);
+		seg_buf = slurp_ramdisk_ppc(ramdisk, &seg_size);
 		/* Load ramdisk at top of memory */
 		hole_addr = add_buffer(info, seg_buf, seg_size, seg_size,
 				0, dtb_addr + blob_size, max_addr, -1);
@@ -211,7 +261,8 @@ static int ppc_load_bare_bits(int argc, char **argv, const char *buf,
 			load_addr + KERNEL_ACCESS_TOP, 1);
 	if (dtb_addr_actual != dtb_addr) {
 		printf("dtb_addr_actual: %lx, dtb_addr: %lx\n", dtb_addr_actual, dtb_addr);
-		die("Error device tree not loadded to address it was expecting to be loaded too!\n");
+		error_msg = "Error device tree not loadded to address it was expecting to be loaded too!\n";
+		goto out2;
 	}
 
 	/* set various variables for the purgatory */
@@ -248,7 +299,15 @@ static int ppc_load_bare_bits(int argc, char **argv, const char *buf,
 	addr = elf_rel_get_addr(&info->rhdr, "purgatory_start");
 	info->entry = (void *)addr;
 
-	return 0;
+out2:
+	free(cmdline_buf);
+out:
+	free(crash_cmdline);
+	if (!tmp_cmdline)
+		free(command_line);
+	if (error_msg)
+		die(error_msg);
+	return ret;
 }
 
 int uImage_ppc_load(int argc, char **argv, const char *buf, off_t len,

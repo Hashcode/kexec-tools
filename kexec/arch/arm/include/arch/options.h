@@ -5,9 +5,10 @@
 
 #define OPT_APPEND	'a'
 #define OPT_RAMDISK	'r'
-#define OPT_DTB     (OPT_ARCH_MAX+0)
-#define OPT_ATAGS   (OPT_ARCH_MAX+1)
-#define OPT_ATAGS_FILE   (OPT_ARCH_MAX+2)
+#define OPT_DTB		(OPT_ARCH_MAX+0)
+#define OPT_ATAGS	(OPT_ARCH_MAX+1)
+#define OPT_IMAGE_SIZE	(OPT_ARCH_MAX+2)
+#define OPT_ATAGS_FILE   (OPT_ARCH_MAX+3)
 
 /* Options relevant to the architecture (excluding loader-specific ones),
  * in this case none:
@@ -39,8 +40,11 @@
 	{ "ramdisk",		1, 0, OPT_RAMDISK },	\
 	{ "dtb",		1, 0, OPT_DTB }, 	\
 	{ "atags",		0, 0, OPT_ATAGS },	\
+	{ "image-size",		1, 0, OPT_IMAGE_SIZE },	\
 	{ "atags-file",		1, 0, OPT_ATAGS_FILE },
 
-#define KEXEC_ALL_OPT_STR KEXEC_ARCH_OPT_STR "a:r:"
+#define KEXEC_ALL_OPT_STR KEXEC_ARCH_OPT_STR "a:r:s:"
+
+extern unsigned int kexec_arm_image_size;
 
 #endif /* KEXEC_ARCH_ARM_OPTIONS_H */

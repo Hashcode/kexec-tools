@@ -154,9 +154,6 @@ int elf_ia64_load(int argc, char **argv, const char *buf, off_t len,
 			if (opt < OPT_ARCH_MAX) {
 				break;
 			}
-		case '?':
-			usage();
-			return -1;
 		case OPT_APPEND:
 			command_line = optarg;
 			break;
@@ -264,7 +261,7 @@ int elf_ia64_load(int argc, char **argv, const char *buf, off_t len,
 			strcat(cmdline, buf);
 		}
 
-		command_line_len = (command_line_len + 15)&(~15);
+		command_line_len = _ALIGN(command_line_len, 16);
 		command_line_base = add_buffer(info, cmdline,
 				command_line_len, command_line_len,
 				getpagesize(), 0UL,

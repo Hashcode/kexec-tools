@@ -117,9 +117,6 @@ int arch_process_options(int argc, char **argv)
 			if (opt < OPT_MAX) {
 				break;
 			}
-		case '?':
-		        usage();
-		  	return -1;
 		case OPT_APPEND:
 		case OPT_NBSD_HOWTO:
 		case OPT_NBSD_MROOT:
@@ -159,8 +156,7 @@ char *get_append(void)
         FILE *fp;
         int len;
         if((fp = fopen("/proc/cmdline", "r")) == NULL){
-              printf("/proc/cmdline file open error !!\n");
-              exit(1);
+              die("/proc/cmdline file open error !!\n");
         }
         fgets(append_buf, 256, fp);
         len = strlen(append_buf);

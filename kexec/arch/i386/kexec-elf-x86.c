@@ -90,6 +90,9 @@ int elf_x86_load(int argc, char **argv, const char *buf, off_t len,
 	struct mem_ehdr ehdr;
 	char *command_line = NULL, *modified_cmdline = NULL;
 	const char *append = NULL;
+	char *tmp_cmdline = NULL;
+	char *error_msg = NULL;
+	int result;
 	int command_line_len;
 	int modified_cmdline_len;
 	const char *ramdisk;
@@ -120,9 +123,9 @@ int elf_x86_load(int argc, char **argv, const char *buf, off_t len,
 	 * Parse the command line arguments
 	 */
 	arg_style = ARG_STYLE_ELF;
-	modified_cmdline = 0;
 	modified_cmdline_len = 0;
 	ramdisk = 0;
+	result = 0;
 	while((opt = getopt_long(argc, argv, short_options, options, 0)) != -1) {
 		switch(opt) {
 		default:
@@ -130,14 +133,11 @@ int elf_x86_load(int argc, char **argv, const char *buf, off_t len,
 			if (opt < OPT_ARCH_MAX) {
 				break;
 			}
-		case '?':
-			usage();
-			return -1;
 		case OPT_APPEND:
 			append = optarg;
 			break;
 		case OPT_REUSE_CMDLINE:
-			command_line = get_command_line();
+			tmp_cmdline = get_command_line();
 			break;
 		case OPT_RAMDISK:
 			ramdisk = optarg;
@@ -157,10 +157,16 @@ int elf_x86_load(int argc, char **argv, const char *buf, off_t len,
 			break;
 		}
 	}
-	command_line = concat_cmdline(command_line, append);
+	command_line = concat_cmdline(tmp_cmdline, append);
+	if (tmp_cmdline) {
+		free(tmp_cmdline);
+	}
 	command_line_len = 0;
 	if (command_line) {
 		command_line_len = strlen(command_line) +1;
+	} else {
+	    command_line = strdup("\0");
+	    command_line_len = 1;
 	}
 
 	/* Need to append some command line parameters internally in case of
@@ -215,7 +221,8 @@ int elf_x86_load(int argc, char **argv, const char *buf, off_t len,
 		elf_rel_set_symbol(&info->rhdr, "entry32_regs", &regs, sizeof(regs));
 
 		if (ramdisk) {
-			die("Ramdisks not supported with generic elf arguments");
+			error_msg = "Ramdisks not supported with generic elf arguments";
+			goto out;
 		}
 	}
 	else if (arg_style == ARG_STYLE_LINUX) {
@@ -256,8 +263,10 @@ int elf_x86_load(int argc, char **argv, const char *buf, off_t len,
 		if (info->kexec_flags & (KEXEC_ON_CRASH|KEXEC_PRESERVE_CONTEXT)) {
 			rc = load_crashdump_segments(info, modified_cmdline,
 						max_addr, 0);
-			if (rc < 0)
-				return -1;
+			if (rc < 0) {
+				result = -1;
+				goto out;
+			}
 			/* Use new command line. */
 			free(command_line);
 			command_line = modified_cmdline;
@@ -272,7 +281,7 @@ int elf_x86_load(int argc, char **argv, const char *buf, off_t len,
 			ramdisk_buf, ramdisk_length);
 
 		/* Fill in the information bios calls would usually provide */
-		setup_linux_system_parameters(&hdr->hdr, info->kexec_flags);
+		setup_linux_system_parameters(info, &hdr->hdr);
 
 		/* Initialize the registers */
 		elf_rel_get_symbol(&info->rhdr, "entry32_regs", &regs, sizeof(regs));
@@ -283,10 +292,13 @@ int elf_x86_load(int argc, char **argv, const char *buf, off_t len,
 		elf_rel_set_symbol(&info->rhdr, "entry32_regs", &regs, sizeof(regs));
 	}
 	else {
-		die("Unknown argument style\n");
+		error_msg = "Unknown argument style\n";
 	}
 
+out:
 	free(command_line);
 	free(modified_cmdline);
-	return 0;
+	if (error_msg)
+		die(error_msg);
+	return result;
 }

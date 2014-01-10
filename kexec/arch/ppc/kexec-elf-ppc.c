@@ -37,7 +37,7 @@ const char *ramdisk;
 int create_flatten_tree(struct kexec_info *, unsigned char **, unsigned long *,
 			char *);
 
-#define UPSZ(X) ((sizeof(X) + 3) & ~3)
+#define UPSZ(X) _ALIGN_UP(sizeof(X), 4);
 #ifdef WITH_GAMECUBE
 static struct boot_notes {
 	Elf_Bhdr hdr;
@@ -156,9 +156,11 @@ int elf_ppc_load(int argc, char **argv,	const char *buf, off_t len,
 {
 	struct mem_ehdr ehdr;
 	char *command_line, *crash_cmdline, *cmdline_buf;
-	int command_line_len;
+	char *tmp_cmdline;
+	int command_line_len, crash_cmdline_len;
 	char *dtb;
 	int result;
+	char *error_msg;
 	unsigned long max_addr, hole_addr;
 	struct mem_phdr *phdr;
 	size_t size;
@@ -190,12 +192,14 @@ int elf_ppc_load(int argc, char **argv,	const char *buf, off_t len,
 	char *blob_buf = NULL;
 	off_t blob_size = 0;
 
-	command_line = NULL;
+	command_line = tmp_cmdline = NULL;
 	dtb = NULL;
 	max_addr = LONG_MAX;
 	hole_addr = 0;
 	kernel_addr = 0;
 	ramdisk = 0;
+	result = 0;
+	error_msg = NULL;
 
 	while ((opt = getopt_long(argc, argv, short_options, options, 0)) != -1) {
 		switch (opt) {
@@ -204,11 +208,8 @@ int elf_ppc_load(int argc, char **argv,	const char *buf, off_t len,
 			if (opt < OPT_ARCH_MAX) {
 				break;
 			}
-		case '?':
-			usage();
-			return -1;
 		case OPT_APPEND:
-			command_line = optarg;
+			tmp_cmdline = optarg;
 			break;
 		case OPT_RAMDISK:
 			ramdisk = optarg;
@@ -223,8 +224,7 @@ int elf_ppc_load(int argc, char **argv,	const char *buf, off_t len,
 
 		case OPT_NODES:
 			if (cur_fixup >= FIXUP_ENTRYS) {
-				fprintf(stderr, "The number of entries for the fixup is too large\n");
-				exit(1);
+				die("The number of entries for the fixup is too large\n");
 			}
 			fixup_nodes[cur_fixup] = optarg;
 			cur_fixup++;
@@ -232,33 +232,23 @@ int elf_ppc_load(int argc, char **argv,	const char *buf, off_t len,
 		}
 	}
 
-	command_line_len = 0;
-	if (command_line) {
-		command_line_len = strlen(command_line) + 1;
-	} else {
-		command_line = get_command_line();
-		command_line_len = strlen(command_line) + 1;
-	}
-
 	if (ramdisk && reuse_initrd)
 		die("Can't specify --ramdisk or --initrd with --reuseinitrd\n");
 
-	fixup_nodes[cur_fixup] = NULL;
+	command_line_len = 0;
+	if (tmp_cmdline) {
+		command_line = tmp_cmdline;
+	} else {
+		command_line = get_command_line();
+	}
+	command_line_len = strlen(command_line);
 
-	/* Need to append some command line parameters internally in case of
-	 * taking crash dumps.
-	 */
-	if (info->kexec_flags & KEXEC_ON_CRASH) {
-		crash_cmdline = xmalloc(COMMAND_LINE_SIZE);
-		memset((void *)crash_cmdline, 0, COMMAND_LINE_SIZE);
-	} else
-		crash_cmdline = NULL;
+	fixup_nodes[cur_fixup] = NULL;
 
 	/* Parse the Elf file */
 	result = build_elf_exec_info(buf, len, &ehdr, 0);
 	if (result < 0) {
-		free_elf_info(&ehdr);
-		return result;
+		goto out;
 	}
 
 #ifdef WITH_GAMECUBE
@@ -287,30 +277,27 @@ int elf_ppc_load(int argc, char **argv,	const char *buf, off_t len,
 	/* Load the Elf data */
 	result = elf_exec_load(&ehdr, info);
 	if (result < 0) {
-		free_elf_info(&ehdr);
-		return result;
+		goto out;
 	}
 
-	/* If panic kernel is being loaded, additional segments need
-	 * to be created.
+	/*
+	 * Need to append some command line parameters internally in case of
+	 * taking crash dumps. Additional segments need to be created.
 	 */
 	if (info->kexec_flags & KEXEC_ON_CRASH) {
+		crash_cmdline = xmalloc(COMMAND_LINE_SIZE);
+		memset((void *)crash_cmdline, 0, COMMAND_LINE_SIZE);
 		result = load_crashdump_segments(info, crash_cmdline,
 						max_addr, 0);
 		if (result < 0) {
-			free(crash_cmdline);
-			return -1;
+			result = -1;
+			goto out;
 		}
+		crash_cmdline_len = strlen(crash_cmdline);
+	} else {
+		crash_cmdline = NULL;
+		crash_cmdline_len = 0;
 	}
-
-	cmdline_buf = xmalloc(COMMAND_LINE_SIZE);
-	memset((void *)cmdline_buf, 0, COMMAND_LINE_SIZE);
-	if (command_line)
-		strncat(cmdline_buf, command_line, command_line_len);
-	if (crash_cmdline)
-		strncat(cmdline_buf, crash_cmdline,
-				sizeof(crash_cmdline) -
-				strlen(crash_cmdline) - 1);
 
 	/*
 	 * In case of a toy we take the hardcoded things and an easy setup via
@@ -327,14 +314,14 @@ int elf_ppc_load(int argc, char **argv,	const char *buf, off_t len,
 		setup_size = setup_simple_size;
 		setup_simple_regs.spr8 = ehdr.e_entry;	/* Link Register */
 	}
-	note_bytes = sizeof(elf_boot_notes) + ((command_line_len + 3) & ~3);
-	arg_bytes = note_bytes + ((setup_size + 3) & ~3);
+	note_bytes = sizeof(elf_boot_notes) + _ALIGN(command_line_len, 4);
+	arg_bytes = note_bytes + _ALIGN(setup_size, 4);
 
 	arg_buf = xmalloc(arg_bytes);
 	arg_base = add_buffer(info, 
 		arg_buf, arg_bytes, arg_bytes, 4, 0, elf_max_addr(&ehdr), 1);
 
-	notes = (struct boot_notes *)(arg_buf + ((setup_size + 3) & ~3));
+	notes = (struct boot_notes *)(arg_buf + _ALIGN(setup_size, 4));
 
 	memcpy(arg_buf, setup_start, setup_size);
 	memcpy(notes, &elf_boot_notes, sizeof(elf_boot_notes));
@@ -345,6 +332,20 @@ int elf_ppc_load(int argc, char **argv,	const char *buf, off_t len,
 
 	info->entry = (void *)arg_base;
 #else
+	if (crash_cmdline_len + command_line_len + 1 > COMMAND_LINE_SIZE) {
+		printf("Kernel command line exceeds size\n");
+		return -1;
+	}
+
+	cmdline_buf = xmalloc(COMMAND_LINE_SIZE);
+	memset((void *)cmdline_buf, 0, COMMAND_LINE_SIZE);
+	if (command_line)
+		strncat(cmdline_buf, command_line, command_line_len);
+	if (crash_cmdline)
+		strncat(cmdline_buf, crash_cmdline,
+				sizeof(crash_cmdline) -
+				strlen(crash_cmdline) - 1);
+
 	elf_rel_build_load(info, &info->rhdr, (const char *)purgatory,
 			purgatory_size, 0, elf_max_addr(&ehdr), 1, 0);
 
@@ -358,14 +359,16 @@ int elf_ppc_load(int argc, char **argv,	const char *buf, off_t len,
 		create_flatten_tree(info, (unsigned char **)&blob_buf,
 				(unsigned long *)&blob_size, cmdline_buf);
 	}
-	if (!blob_buf || !blob_size)
-		die("Device tree seems to be an empty file.\n");
+	if (!blob_buf || !blob_size) {
+		error_msg = "Device tree seems to be an empty file.\n";
+		goto out2;
+	}
 
 	/* initial fixup for device tree */
 	blob_buf = fixup_dtb_init(info, blob_buf, &blob_size, kernel_addr, &dtb_addr);
 
 	if (ramdisk) {
-		seg_buf = slurp_file(ramdisk, &seg_size);
+		seg_buf = slurp_ramdisk_ppc(ramdisk, &seg_size);
 		/* load the ramdisk *above* the device tree */
 		hole_addr = add_buffer(info, seg_buf, seg_size, seg_size,
 				0, dtb_addr + blob_size + 1,  max_addr, -1);
@@ -382,7 +385,7 @@ int elf_ppc_load(int argc, char **argv,	const char *buf, off_t len,
 			(ramdisk_base > crash_base + crash_size) ) {
 			printf("WARNING: ramdisk is above crashkernel region!\n");
 		}
-		else if (ramdisk_base + initrd_size > crash_base + crash_size) {
+		else if (ramdisk_base + ramdisk_size > crash_base + crash_size) {
 			printf("WARNING: ramdisk overflows crashkernel region!\n");
 		}
 	}
@@ -394,13 +397,18 @@ int elf_ppc_load(int argc, char **argv,	const char *buf, off_t len,
 	dtb_addr_actual = add_buffer(info, blob_buf, blob_size, blob_size, 0, dtb_addr,
 			kernel_addr + KERNEL_ACCESS_TOP, 1);
 	if (dtb_addr_actual != dtb_addr) {
-		die("Error device tree not loadded to address it was expecting to be loaded too!\n");
+		error_msg = "Error device tree not loadded to address it was expecting to be loaded too!\n";
+		goto out2;
 	}
 
-	/* set various variables for the purgatory  ehdr.e_entry is a
-	 * virtual address, we can use kernel_addr which
-	 * should be the physical start address of the kernel */
-	addr = kernel_addr;
+	/* 
+	 * set various variables for the purgatory.
+	 * ehdr.e_entry is a virtual address. we know physical start
+	 * address of the kernel (kernel_addr). Find the offset of
+	 * e_entry from the virtual start address(e_phdr[0].p_vaddr)
+	 * and calculate the actual physical address of the 'kernel entry'.
+	 */
+	addr = kernel_addr + (ehdr.e_entry - ehdr.e_phdr[0].p_vaddr);
 	elf_rel_set_symbol(&info->rhdr, "kernel", &addr, sizeof(addr));
 
 	addr = dtb_addr;
@@ -435,7 +443,17 @@ int elf_ppc_load(int argc, char **argv,	const char *buf, off_t len,
 
 	addr = elf_rel_get_addr(&info->rhdr, "purgatory_start");
 	info->entry = (void *)addr;
-#endif
 
-	return 0;
+out2:
+	free(cmdline_buf);
+#endif
+out:
+	free_elf_info(&ehdr);
+	free(crash_cmdline);
+	if (!tmp_cmdline)
+		free(command_line);
+	if (error_msg)
+		die(error_msg);
+
+	return result;
 }

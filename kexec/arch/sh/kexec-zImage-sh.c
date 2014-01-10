@@ -94,9 +94,6 @@ int zImage_sh_load(int argc, char **argv, const char *buf, off_t len,
 			if (opt < OPT_ARCH_MAX) {
 				break;
 			}
-		case '?':
-			usage();
-			return -1;
 		case OPT_APPEND:
 			command_line = optarg;
 			break;
@@ -138,7 +135,7 @@ int zImage_sh_load(int argc, char **argv, const char *buf, off_t len,
 	 * the zImage will relocate itself, but only up seems supported.
 	 */
 
-	image_base = (empty_zero + (0x10000 - 1)) & ~(0x10000 - 1);
+	image_base = _ALIGN(empty_zero, 0x10000);
 	add_segment(info, buf, len, image_base, len);
 	info->entry = (void *)virt_to_phys(image_base);
 	return 0;

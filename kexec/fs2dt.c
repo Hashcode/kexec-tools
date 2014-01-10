@@ -84,7 +84,7 @@ static void dt_reserve(unsigned **dt_ptr, unsigned words)
 		offset = *dt_ptr - dt_base;
 		dt_base = new_dt;
 		dt_cur_size = new_size;
-		*dt_ptr = cpu_to_be32((unsigned)dt_base + offset);
+		*dt_ptr = dt_base + offset;
 		memset(*dt_ptr, 0, (new_size - offset)*4);
 	}
 }
@@ -112,19 +112,22 @@ static void checkprop(char *name, unsigned *data, int len)
 	if ((data == NULL) && (base || size || end))
 		die("unrecoverable error: no property data");
 	else if (!strcmp(name, "linux,rtas-base"))
-		base = *data;
+		base = be32_to_cpu(*data);
 	else if (!strcmp(name, "linux,tce-base"))
-		base = *(unsigned long long *) data;
+		base = be64_to_cpu(*(unsigned long long *) data);
 	else if (!strcmp(name, "rtas-size") ||
 			!strcmp(name, "linux,tce-size"))
-		size = *data;
+		size = be32_to_cpu(*data);
 	else if (reuse_initrd && !strcmp(name, "linux,initrd-start"))
 		if (len == 8)
-			base = *(unsigned long long *) data;
+			base = be64_to_cpu(*(unsigned long long *) data);
 		else
-			base = *data;
+			base = be32_to_cpu(*data);
 	else if (reuse_initrd && !strcmp(name, "linux,initrd-end"))
-		end = *(unsigned long long *) data;
+		if (len == 8)
+			end = be64_to_cpu(*(unsigned long long *) data);
+		else
+			end = be32_to_cpu(*data);
 
 	if (size && end)
 		die("unrecoverable error: size and end set at same time\n");
@@ -267,7 +270,7 @@ static void add_dyn_reconf_usable_mem_property__(int fd)
 	pad_structure_block(rlen);
 	memcpy(dt, ranges, rlen);
 	free(ranges);
-	dt += cpu_to_be32((rlen + 3)/4);
+	dt += (rlen + 3)/4;
 }
 
 static void add_dyn_reconf_usable_mem_property(struct dirent *dp, int fd)
@@ -282,8 +285,8 @@ static void add_dyn_reconf_usable_mem_property(struct dirent *dp, int fd) {}
 static void add_usable_mem_property(int fd, size_t len)
 {
 	char fname[MAXPATH], *bname;
-	uint32_t buf[2];
-	uint32_t *ranges;
+	uint64_t buf[2];
+	uint64_t *ranges;
 	int ranges_size = MEM_RANGE_CHUNK_SZ;
 	uint64_t base, end, loc_base, loc_end;
 	size_t range;
@@ -308,8 +311,8 @@ static void add_usable_mem_property(int fd, size_t len)
 
 	if (~0ULL - buf[0] < buf[1])
 		die("unrecoverable error: mem property overflow\n");
-	base = be32_to_cpu(buf[0]);
-	end = base + be32_to_cpu(buf[1]);
+	base = be64_to_cpu(buf[0]);
+	end = base + be64_to_cpu(buf[1]);
 
 	ranges = malloc(ranges_size * sizeof(*ranges));
 	if (!ranges)
@@ -525,7 +528,7 @@ static void putnode(void)
 	putprops(dn, namelist, numlist);
 
 	/* Add initrd entries to the second kernel */
-	if (initrd_base && !strcmp(basename,"/chosen/")) {
+	if (initrd_base && initrd_size && !strcmp(basename,"chosen/")) {
 		int len = 8;
 		unsigned long long initrd_end;
 
@@ -554,7 +557,8 @@ static void putnode(void)
 
 	/* Add cmdline to the second kernel.  Check to see if the new
 	 * cmdline has a root=.  If not, use the old root= cmdline.  */
-	if (!strcmp(basename,"/chosen/")) {
+	if (!strcmp(basename,"chosen/")) {
+		size_t result;
 		size_t cmd_len = 0;
 		char *param = NULL;
 		char filename[MAXPATH];
@@ -636,8 +640,13 @@ static void putnode(void)
 			close(fd);
 			goto no_debug;
 		}
-		read(fd, buff, statbuf.st_size);
+		result = read(fd, buff, statbuf.st_size);
 		close(fd);
+		if (result <= 0) {
+			printf("Unable to read %s, printing from purgatory is diabled\n",
+														filename);
+			goto no_debug;
+		}
 		strncpy(filename, "/proc/device-tree/", MAXPATH);
 		strncat(filename, buff, MAXPATH);
 		strncat(filename, "/compatible", MAXPATH);
@@ -659,8 +668,9 @@ static void putnode(void)
 			close(fd);
 			goto no_debug;
 		}
-		read(fd, buff, statbuf.st_size);
-		if (!strcmp(buff, "hvterm1") || !strcmp(buff, "hvterm-protocol"))
+		result = read(fd, buff, statbuf.st_size);
+		if (result && (!strcmp(buff, "hvterm1")
+			|| !strcmp(buff, "hvterm-protocol")))
 			my_debug = 1;
 		close(fd);
 		free(buff);
@@ -697,8 +707,7 @@ static void add_boot_block(char **bufp, off_t *sizep)
 	unsigned long tlen, toff;
 	char *buf;
 
-	len = sizeof(bb[0]);
-	len += 7; len &= ~7;
+	len = _ALIGN(sizeof(bb[0]), 8);
 
 	bb->off_mem_rsvmap = cpu_to_be32(len);
 
@@ -721,7 +730,7 @@ static void add_boot_block(char **bufp, off_t *sizep)
 
 	len = propnum("");
 	bb->dt_strings_size = cpu_to_be32(len);
-	len +=  3; len &= ~3;
+	len = _ALIGN(len, 4);
 	bb->totalsize = cpu_to_be32(be32_to_cpu(bb->off_dt_strings) + len);
 
 	bb->magic = cpu_to_be32(0xd00dfeed);

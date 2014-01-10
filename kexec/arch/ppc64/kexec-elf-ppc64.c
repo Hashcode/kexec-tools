@@ -35,6 +35,7 @@
 #include "../../kexec-elf.h"
 #include "../../kexec-syscall.h"
 #include "kexec-ppc64.h"
+#include "../../fs2dt.h"
 #include "crashdump-ppc64.h"
 #include <arch/options.h>
 
@@ -82,8 +83,10 @@ int elf_ppc64_load(int argc, char **argv, const char *buf, off_t len,
 	off_t seg_size = 0;
 	struct mem_phdr *phdr;
 	size_t size;
+#ifdef NEED_RESERVE_DTB
 	uint64_t *rsvmap_ptr;
 	struct bootblock *bb_ptr;
+#endif
 	int i;
 	int result, opt;
 	uint64_t my_kernel, my_dt_offset;
@@ -101,6 +104,7 @@ int elf_ppc64_load(int argc, char **argv, const char *buf, off_t len,
 		{ "ramdisk",            1, NULL, OPT_RAMDISK },
 		{ "initrd",             1, NULL, OPT_RAMDISK },
 		{ "devicetreeblob",     1, NULL, OPT_DEVICETREEBLOB },
+		{ "dtb",                1, NULL, OPT_DEVICETREEBLOB },
 		{ "args-linux",		0, NULL, OPT_ARGS_IGNORE },
 		{ 0,                    0, NULL, 0 },
 	};
@@ -123,9 +127,6 @@ int elf_ppc64_load(int argc, char **argv, const char *buf, off_t len,
 			/* Ignore core options */
 			if (opt < OPT_ARCH_MAX)
 				break;
-		case '?':
-			usage();
-			return -1;
 		case OPT_APPEND:
 			cmdline = optarg;
 			break;
@@ -230,18 +231,20 @@ int elf_ppc64_load(int argc, char **argv, const char *buf, off_t len,
 	my_dt_offset = add_buffer(info, seg_buf, seg_size, seg_size,
 				0, 0, max_addr, -1);
 
+#ifdef NEED_RESERVE_DTB
 	/* patch reserve map address for flattened device-tree
 	 * find last entry (both 0) in the reserve mem list.  Assume DT
 	 * entry is before this one
 	 */
 	bb_ptr = (struct bootblock *)(seg_buf);
-	rsvmap_ptr = (uint64_t *)(seg_buf + bb_ptr->off_mem_rsvmap);
+	rsvmap_ptr = (uint64_t *)(seg_buf + be32_to_cpu(bb_ptr->off_mem_rsvmap));
 	while (*rsvmap_ptr || *(rsvmap_ptr+1))
 		rsvmap_ptr += 2;
 	rsvmap_ptr -= 2;
-	*rsvmap_ptr = my_dt_offset;
+	*rsvmap_ptr = cpu_to_be64(my_dt_offset);
 	rsvmap_ptr++;
-	*rsvmap_ptr = bb_ptr->totalsize;
+	*rsvmap_ptr = cpu_to_be64((uint64_t)be32_to_cpu(bb_ptr->totalsize));
+#endif
 
 	/* Set kernel */
 	elf_rel_set_symbol(&info->rhdr, "kernel", &my_kernel, sizeof(my_kernel));
@@ -345,6 +348,7 @@ void elf_ppc64_usage(void)
 	fprintf(stderr, "     --ramdisk=<filename> Initial RAM disk.\n");
 	fprintf(stderr, "     --initrd=<filename> same as --ramdisk.\n");
 	fprintf(stderr, "     --devicetreeblob=<filename> Specify device tree blob file.\n");
+	fprintf(stderr, "     --dtb=<filename> same as --devicetreeblob.\n");
 
 	fprintf(stderr, "elf support is still broken\n");
 }

@@ -83,9 +83,6 @@ int netbsd_sh_load(int argc, char **argv, const char *buf, off_t UNUSED(len),
 			if (opt < OPT_ARCH_MAX) {
 				break;
 			}
-		case '?':
-			usage();
-			return -1;
 		case OPT_NBSD_HOWTO:
 			howto = optarg;
 			break;
@@ -121,7 +118,7 @@ int netbsd_sh_load(int argc, char **argv, const char *buf, off_t UNUSED(len),
 		        size = bbs;
 		}
 
-		size = (size + psz - 1) & ~(psz - 1);
+		size = _ALIGN(size, psz);
 		memset(&img[bbs], 0, size-bbs);
 		add_segment(info, img, size, start, size);
 		start += size;
@@ -132,7 +129,7 @@ int netbsd_sh_load(int argc, char **argv, const char *buf, off_t UNUSED(len),
 	if (miniroot) {
 		miniroot_buf = slurp_file(miniroot, &miniroot_length);
 		howto_value |= 0x200;
-		size = (miniroot_length + psz - 1) & ~(psz - 1);
+		size = _ALIGN(miniroot_length, psz);
 		add_segment(info, miniroot_buf, size, start, size);
 		start += size;
 	}

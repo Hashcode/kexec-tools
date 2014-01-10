@@ -342,8 +342,17 @@ static void putnode(void)
 
 	putprops(dn, namelist, numlist);
 
-	/* Add initrd entries to the second kernel */
-	if (initrd_base && !strcmp(basename, "chosen/")) {
+	/* 
+	 * Add initrd entries to the second kernel
+	 * if
+	 * 	a) a ramdisk is specified in cmdline
+	 * 	 OR
+	 * 	b) reuseinitrd is specified and a initrd is
+	 * 	   used by the kernel.
+	 *
+	 */
+	if ((ramdisk || (initrd_base && reuse_initrd))
+		&& !strcmp(basename, "chosen/")) {
 		int len = 8;
 		unsigned long long initrd_end;
 		*dt++ = 3;
@@ -362,8 +371,9 @@ static void putnode(void)
 
 		memcpy(dt, &initrd_end, len);
 		dt += (len + 3)/4;
-
-		reserve(initrd_base, initrd_size);
+		/* reserve the existing initrd image in case of reuse_initrd */
+		if (initrd_base && initrd_size && reuse_initrd)
+			reserve(initrd_base, initrd_size);
 	}
 
 	for (i = 0; i < numlist; i++) {
@@ -407,8 +417,7 @@ int create_flatten_tree(struct kexec_info *info, unsigned char **bufp,
 	putnode();
 	*dt++ = 9;
 
-	len = sizeof(bb[0]);
-	len += 7; len &= ~7;
+	len = _ALIGN(sizeof(bb[0]), 8);
 
 	bb->off_mem_rsvmap = len;
 
@@ -426,7 +435,7 @@ int create_flatten_tree(struct kexec_info *info, unsigned char **bufp,
 
 	len = propnum("");
 	bb->dt_strings_size = len;
-	len +=  3; len &= ~3;
+	len = _ALIGN(len, 4);
 	bb->totalsize = bb->off_dt_strings + len;
 
 	bb->magic = 0xd00dfeed;

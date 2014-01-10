@@ -21,7 +21,6 @@
 #define COMMAND_LINESIZE      896
 #define MAX_MEMORY_RANGES     1024
 
-#define ALIGN_UP(addr, size) (((addr) + ((size)-1)) & (~((size)-1)))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
@@ -35,4 +34,4 @@ extern int get_memory_ranges_s390(struct memory_range range[], int *ranges,
 				  int with_crashk);
 extern int command_line_add(const char *str);
 
-#endif /* KEXEC_IA64_H */
+#endif /* KEXEC_S390_H */

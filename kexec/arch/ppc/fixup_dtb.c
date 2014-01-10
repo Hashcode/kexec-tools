@@ -54,13 +54,11 @@ static void fixup_nodes(char *nodes[])
 
 		len = asprintf(&fname, "%s%s", proc_dts, nodes[index]);
 		if (len < 0)
-			fatal("asprintf() failed\n");
+			die("asprintf() failed\n");
 
 		content = slurp_file(fname, &content_size);
 		if (!content) {
-			fprintf(stderr, "Can't open %s: %s\n",
-					fname, strerror(errno));
-			exit(1);
+			die("Can't open %s: %s\n", fname, strerror(errno));
 		}
 
 		prop_name = fname + len;
@@ -78,7 +76,7 @@ static void fixup_nodes(char *nodes[])
 
 		ret = setprop(node, prop_name, content, content_size);
 		if (ret < 0)
-			fatal("setprop of %s/%s size: %ld failed: %s\n",
+			die("setprop of %s/%s size: %ld failed: %s\n",
 					node_name, prop_name, content_size,
 					fdt_strerror(ret));
 
@@ -125,10 +123,10 @@ static char *expand_buf(int minexpand, char *blob_buf, off_t *blob_size)
 	size = _ALIGN(size + minexpand, EXPAND_GRANULARITY);
 	blob_buf = realloc(blob_buf, size);
 	if (!blob_buf)
-		fatal("Couldn't find %d bytes to expand device tree\n\r", size);
+		die("Couldn't find %d bytes to expand device tree\n\r", size);
 	rc = fdt_open_into(blob_buf, blob_buf, size);
 	if (rc != 0)
-		fatal("Couldn't expand fdt into new buffer: %s\n\r",
+		die("Couldn't expand fdt into new buffer: %s\n\r",
 			fdt_strerror(rc));
 
 	*blob_size = fdt_totalsize(blob_buf);

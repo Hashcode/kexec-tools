@@ -225,7 +225,7 @@ int elf_rel_load(struct mem_ehdr *ehdr, struct kexec_info *info,
 				buf_align = align;
 			}
 			/* Now align bufsz */
-			bufsz = (bufsz + (align - 1)) & ~(align - 1);
+			bufsz = _ALIGN(bufsz, align);
 			/* And now add our buffer */
 			bufsz += shdr->sh_size;
 		}
@@ -237,7 +237,7 @@ int elf_rel_load(struct mem_ehdr *ehdr, struct kexec_info *info,
 				bss_align = align;
 			}
 			/* Now align bsssz */
-			bsssz = (bsssz + (align - 1)) & ~(align -1);
+			bsssz = _ALIGN(bsssz, align);
 			/* And now add our buffer */
 			bsssz += shdr->sh_size;
 		}
@@ -269,7 +269,7 @@ int elf_rel_load(struct mem_ehdr *ehdr, struct kexec_info *info,
 		if (shdr->sh_type != SHT_NOBITS) {
 			unsigned long off;
 			/* Adjust the address */
-			data_addr = (data_addr + (align - 1)) & ~(align -1);
+			data_addr = _ALIGN(data_addr, align);
 
 			/* Update the section */
 			off = data_addr - buf_addr;
@@ -281,7 +281,7 @@ int elf_rel_load(struct mem_ehdr *ehdr, struct kexec_info *info,
 			data_addr += shdr->sh_size;
 		} else {
 			/* Adjust the address */
-			bss_addr = (bss_addr + (align - 1)) & ~(align -1);
+			bss_addr = _ALIGN(bss_addr, align);
 
 			/* Update the section */
 			shdr->sh_addr = bss_addr;
@@ -336,7 +336,7 @@ int elf_rel_load(struct mem_ehdr *ehdr, struct kexec_info *info,
 		}
 		rel_end = shdr->sh_data + shdr->sh_size;
 		for(ptr = shdr->sh_data; ptr < rel_end; ptr += rel_size) {
-			struct mem_rela rel;
+			struct mem_rela rel = {0};
 			struct mem_sym sym;
 			const void *location;
 			const unsigned char *name;
@@ -364,7 +364,7 @@ int elf_rel_load(struct mem_ehdr *ehdr, struct kexec_info *info,
 				name += ehdr->e_shdr[sym.st_shndx].sh_name;
 			}
 
-			dbgprintf("sym: %10s info: %02x other: %02x shndx: %lx value: %lx size: %lx\n",
+			dbgprintf("sym: %10s info: %02x other: %02x shndx: %x value: %llx size: %llx\n",
 				name,
 				sym.st_info,
 				sym.st_other,
@@ -513,7 +513,7 @@ void elf_rel_set_symbol(struct mem_ehdr *ehdr,
 			name);
 	}
 	if (sym.st_size != size) {
-		die("Symbol: %s has size: %lld not %ld\n",
+		die("Symbol: %s has size: %lld not %zd\n",
 			name, sym.st_size, size);
 	}
 	shdr = &ehdr->e_shdr[sym.st_shndx];
@@ -537,7 +537,7 @@ void elf_rel_get_symbol(struct mem_ehdr *ehdr,
 		die("Symbol: %s not found cannot get\n", name);
 	}
 	if (sym.st_size != size) {
-		die("Symbol: %s has size: %lld not %ld\n",
+		die("Symbol: %s has size: %lld not %zd\n",
 			name, sym.st_size, size);
 	}
 	shdr = &ehdr->e_shdr[sym.st_shndx];

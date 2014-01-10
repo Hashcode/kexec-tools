@@ -89,6 +89,7 @@ int elf_x86_64_load(int argc, char **argv, const char *buf, off_t len,
 	struct mem_ehdr ehdr;
 	const char *append = NULL;
 	char *command_line = NULL, *modified_cmdline;
+	char *tmp_cmdline = NULL;
 	int command_line_len;
 	const char *ramdisk;
 	unsigned long entry, max_addr;
@@ -97,6 +98,8 @@ int elf_x86_64_load(int argc, char **argv, const char *buf, off_t len,
 #define ARG_STYLE_LINUX 1
 #define ARG_STYLE_NONE  2
 	int opt;
+	int result = 0;
+	char *error_msg = NULL;
 
 	/* See options.h and add any new options there too! */
 	static const struct option options[] = {
@@ -128,14 +131,11 @@ int elf_x86_64_load(int argc, char **argv, const char *buf, off_t len,
 				break;
 			}
 			fprintf(stderr, "Unknown option: opt: %d\n", opt);
-		case '?':
-			usage();
-			return -1;
 		case OPT_APPEND:
 			append = optarg;
 			break;
 		case OPT_REUSE_CMDLINE:
-			command_line = get_command_line();
+			tmp_cmdline = get_command_line();
 			break;
 		case OPT_RAMDISK:
 			ramdisk = optarg;
@@ -155,7 +155,9 @@ int elf_x86_64_load(int argc, char **argv, const char *buf, off_t len,
 			break;
 		}
 	}
-	command_line = concat_cmdline(command_line, append);
+	command_line = concat_cmdline(tmp_cmdline, append);
+	if (tmp_cmdline)
+		free(tmp_cmdline);
 	command_line_len = 0;
 	if (command_line) {
 		command_line_len = strlen(command_line) +1;
@@ -205,7 +207,8 @@ int elf_x86_64_load(int argc, char **argv, const char *buf, off_t len,
 		elf_rel_set_symbol(&info->rhdr, "entry64_regs", &regs, sizeof(regs));
 
 		if (ramdisk) {
-			die("Ramdisks not supported with generic elf arguments");
+			error_msg = "Ramdisks not supported with generic elf arguments";
+			goto out;
 		}
 	}
 	else if (arg_style == ARG_STYLE_LINUX) {
@@ -237,8 +240,10 @@ int elf_x86_64_load(int argc, char **argv, const char *buf, off_t len,
 		if (info->kexec_flags & KEXEC_ON_CRASH) {
 			rc = load_crashdump_segments(info, modified_cmdline,
 							max_addr, 0);
-			if (rc < 0)
-				return -1;
+			if (rc < 0) {
+				result = -1;
+				goto out;
+			}
 			/* Use new command line. */
 			free(command_line);
 			command_line = modified_cmdline;
@@ -253,7 +258,7 @@ int elf_x86_64_load(int argc, char **argv, const char *buf, off_t len,
 			ramdisk_buf, ramdisk_length);
 
 		/* Fill in the information bios calls would usually provide */
-		setup_linux_system_parameters(&hdr->hdr, info->kexec_flags);
+		setup_linux_system_parameters(info, &hdr->hdr);
 
 		/* Initialize the registers */
 		elf_rel_get_symbol(&info->rhdr, "entry64_regs", &regs, sizeof(regs));
@@ -264,10 +269,13 @@ int elf_x86_64_load(int argc, char **argv, const char *buf, off_t len,
 		elf_rel_set_symbol(&info->rhdr, "entry64_regs", &regs, sizeof(regs));
 	}
 	else {
-		die("Unknown argument style\n");
+		error_msg = "Unknown argument style\n";
 	}
 
+out:
 	free(command_line);
 	free(modified_cmdline);
-	return 0;
+	if (error_msg)
+		die(error_msg);
+	return result;
 }

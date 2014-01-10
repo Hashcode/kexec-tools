@@ -100,6 +100,18 @@ do { \
 	} \
 } while(0)
 
+#define _ALIGN_UP_MASK(addr, mask)   (((addr) + (mask)) & ~(mask))
+#define _ALIGN_DOWN_MASK(addr, mask) ((addr) & ~(mask))
+
+/* align addr on a size boundary - adjust address up/down if needed */
+#define _ALIGN_UP(addr, size)	     \
+	_ALIGN_UP_MASK(addr, (typeof(addr))(size) - 1)
+#define _ALIGN_DOWN(addr, size)	     \
+	_ALIGN_DOWN_MASK(addr, (typeof(addr))(size) - 1)
+
+/* align addr on a size boundary - adjust address up if needed */
+#define _ALIGN(addr, size)     _ALIGN_UP(addr, size)
+
 extern unsigned long long mem_min, mem_max;
 extern int kexec_debug;
 
@@ -218,14 +230,14 @@ extern int file_types;
 	{ "reuseinitrd",	0, 0, OPT_REUSE_INITRD }, \
 	{ "debug",		0, 0, OPT_DEBUG }, \
 
-#define KEXEC_OPT_STR "hvdfxluet:p"
+#define KEXEC_OPT_STR "h?vdfxluet:p"
 
-extern void die(char *fmt, ...)
+extern void die(const char *fmt, ...)
 	__attribute__ ((format (printf, 1, 2)));
 extern void *xmalloc(size_t size);
 extern void *xrealloc(void *ptr, size_t size);
 extern char *slurp_file(const char *filename, off_t *r_size);
-extern char *slurp_file_len(const char *filename, off_t size);
+extern char *slurp_file_len(const char *filename, off_t size, off_t *nread);
 extern char *slurp_decompress_file(const char *filename, off_t *r_size);
 extern unsigned long virt_to_phys(unsigned long addr);
 extern void add_segment(struct kexec_info *info,
@@ -260,6 +272,7 @@ int arch_process_options(int argc, char **argv);
 int arch_compat_trampoline(struct kexec_info *info);
 void arch_update_purgatory(struct kexec_info *info);
 int is_crashkernel_mem_reserved(void);
+int get_max_crash_kernel_limit(uint64_t *start, uint64_t *end);
 char *get_command_line(void);
 
 int kexec_iomem_for_each_line(char *match,
@@ -272,12 +285,13 @@ int kexec_iomem_for_each_line(char *match,
 int parse_iomem_single(char *str, uint64_t *start, uint64_t *end);
 const char * proc_iomem(void);
 
-extern int add_backup_segments(struct kexec_info *info,
-			       unsigned long backup_base,
-			       unsigned long backup_size);
-
 #define MAX_LINE	160
 
 char *concat_cmdline(const char *base, const char *append);
+
+int xen_present(void);
+int xen_kexec_load(struct kexec_info *info);
+int xen_kexec_unload(uint64_t kexec_flags);
+void xen_kexec_exec(void);
 
 #endif /* KEXEC_H */
