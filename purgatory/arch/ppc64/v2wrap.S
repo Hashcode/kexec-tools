@@ -18,6 +18,8 @@
 #  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #
 
+#include "ppc64_asm.h"
+
 # v2wrap.S
 # a wrapper to call purgatory code to backup first
 # 32kB of first kernel into the backup region
@@ -77,7 +79,7 @@ master:
 	ld      1,0(6)          #setup stack
 
 	subi    1,1,112
-	bl      .purgatory
+	bl      DOTSYM(purgatory)
 	nop
 
 	or	3,3,3		# ok now to high priority, lets boot
@@ -93,6 +95,10 @@ master:
 	blt     80f
 	stw     17,28(3)        # save my cpu number as boot_cpu_phys
 80:
+	LOADADDR(6,opal_base)	# For OPAL early debug
+	ld      8,0(6)          # load the OPAL base address in r8
+	LOADADDR(6,opal_entry)	# For OPAL early debug
+	ld      9,0(6)          # load the OPAL entry address in r9
 	LOADADDR(6,kernel)
 	ld      4,0(6)          # load the kernel address
 	LOADADDR(6,run_at_load) # the load flag

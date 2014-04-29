@@ -46,6 +46,8 @@
 #include <xenctrl.h>
 #endif /* HAVE_LIBXENCTRL */
 
+#include "x86-linux-setup.h"
+
 #include <x86/x86-linux.h>
 
 extern struct arch_options_t arch_options;
@@ -98,6 +100,36 @@ static int get_kernel_paddr(struct kexec_info *UNUSED(info),
 	return -1;
 }
 
+/* Retrieve kernel _stext symbol virtual address from /proc/kallsyms */
+static unsigned long long get_kernel_stext_sym(void)
+{
+	const char *kallsyms = "/proc/kallsyms";
+	const char *stext = "_stext";
+	char sym[128];
+	char line[128];
+	FILE *fp;
+	unsigned long long vaddr;
+	char type;
+
+	fp = fopen(kallsyms, "r");
+	if (!fp) {
+		fprintf(stderr, "Cannot open %s\n", kallsyms);
+		return 0;
+	}
+
+	while(fgets(line, sizeof(line), fp) != NULL) {
+		if (sscanf(line, "%Lx %c %s", &vaddr, &type, sym) != 3)
+			continue;
+		if (strcmp(sym, stext) == 0) {
+			dbgprintf("kernel symbol %s vaddr = %16llx\n", stext, vaddr);
+			return vaddr;
+		}
+	}
+
+	fprintf(stderr, "Cannot get kernel %s symbol address\n", stext);
+	return 0;
+}
+
 /* Retrieve info regarding virtual address kernel has been compiled for and
  * size of the kernel from /proc/kcore. Current /proc/kcore parsing from
  * from kexec-tools fails because of malformed elf notes. A kernel patch has
@@ -116,6 +148,7 @@ static int get_kernel_vaddr_and_size(struct kexec_info *UNUSED(info),
 	int align;
 	off_t size;
 	uint32_t elf_flags = 0;
+	uint64_t stext_sym;
 
 	if (elf_info->machine != EM_X86_64)
 		return 0;
@@ -143,9 +176,36 @@ static int get_kernel_vaddr_and_size(struct kexec_info *UNUSED(info),
 		return -1;
 	}
 
-	/* Traverse through the Elf headers and find the region where
-	 * kernel is mapped. */
 	end_phdr = &ehdr.e_phdr[ehdr.e_phnum];
+
+	/* Traverse through the Elf headers and find the region where
+	 * _stext symbol is located in. That's where kernel is mapped */
+	stext_sym = get_kernel_stext_sym();
+	for(phdr = ehdr.e_phdr; stext_sym && phdr != end_phdr; phdr++) {
+		if (phdr->p_type == PT_LOAD) {
+			unsigned long long saddr = phdr->p_vaddr;
+			unsigned long long eaddr = phdr->p_vaddr + phdr->p_memsz;
+			unsigned long long size;
+
+			/* Look for kernel text mapping header. */
+			if (saddr < stext_sym && eaddr > stext_sym) {
+				saddr = _ALIGN_DOWN(saddr, X86_64_KERN_VADDR_ALIGN);
+				elf_info->kern_vaddr_start = saddr;
+				size = eaddr - saddr;
+				/* Align size to page size boundary. */
+				size = _ALIGN(size, align);
+				elf_info->kern_size = size;
+				dbgprintf("kernel vaddr = 0x%llx size = 0x%llx\n",
+					saddr, size);
+				return 0;
+			}
+		}
+	}
+
+	/* If failed to retrieve kernel text mapping through
+	 * /proc/kallsyms, Traverse through the Elf headers again and
+	 * find the region where kernel is mapped using hard-coded
+	 * kernel mapping boundries */
 	for(phdr = ehdr.e_phdr; phdr != end_phdr; phdr++) {
 		if (phdr->p_type == PT_LOAD) {
 			unsigned long long saddr = phdr->p_vaddr;
@@ -167,6 +227,7 @@ static int get_kernel_vaddr_and_size(struct kexec_info *UNUSED(info),
 			}
 		}
 	}
+
 	fprintf(stderr, "Can't find kernel text map area from kcore\n");
 	return -1;
 }
@@ -415,14 +476,14 @@ static int exclude_region(int *nr_ranges, uint64_t start, uint64_t end)
 
 /* Adds a segment from list of memory regions which new kernel can use to
  * boot. Segment start and end should be aligned to 1K boundary. */
-static int add_memmap(struct memory_range *memmap_p, unsigned long long addr,
-								size_t size)
+static int add_memmap(struct memory_range *memmap_p, int *nr_memmap,
+			unsigned long long addr, size_t size, int type)
 {
 	int i, j, nr_entries = 0, tidx = 0, align = 1024;
 	unsigned long long mstart, mend;
 
-	/* Do alignment check. */
-	if ((addr%align) || (size%align))
+	/* Do alignment check if it's RANGE_RAM */
+	if ((type == RANGE_RAM) && ((addr%align) || (size%align)))
 		return -1;
 
 	/* Make sure at least one entry in list is free. */
@@ -448,29 +509,23 @@ static int add_memmap(struct memory_range *memmap_p, unsigned long long addr,
 		else if (addr > mend)
 			tidx = i+1;
 	}
-		/* Insert the memory region. */
-		for (j = nr_entries-1; j >= tidx; j--)
-			memmap_p[j+1] = memmap_p[j];
-		memmap_p[tidx].start = addr;
-		memmap_p[tidx].end = addr + size - 1;
+	/* Insert the memory region. */
+	for (j = nr_entries-1; j >= tidx; j--)
+		memmap_p[j+1] = memmap_p[j];
+	memmap_p[tidx].start = addr;
+	memmap_p[tidx].end = addr + size - 1;
+	memmap_p[tidx].type = type;
+	*nr_memmap = nr_entries + 1;
 
-	dbgprintf("Memmap after adding segment\n");
-	for (i = 0; i < CRASH_MAX_MEMMAP_NR;  i++) {
-		mstart = memmap_p[i].start;
-		mend = memmap_p[i].end;
-		if (mstart == 0 && mend == 0)
-			break;
-		dbgprintf("%016llx - %016llx\n",
-			mstart, mend);
-	}
+	dbgprint_mem_range("Memmap after adding segment", memmap_p, *nr_memmap);
 
 	return 0;
 }
 
 /* Removes a segment from list of memory regions which new kernel can use to
  * boot. Segment start and end should be aligned to 1K boundary. */
-static int delete_memmap(struct memory_range *memmap_p, unsigned long long addr,
-								size_t size)
+static int delete_memmap(struct memory_range *memmap_p, int *nr_memmap,
+				unsigned long long addr, size_t size)
 {
 	int i, j, nr_entries = 0, tidx = -1, operation = 0, align = 1024;
 	unsigned long long mstart, mend;
@@ -532,24 +587,17 @@ static int delete_memmap(struct memory_range *memmap_p, unsigned long long addr,
 		for (j = nr_entries-1; j > tidx; j--)
 			memmap_p[j+1] = memmap_p[j];
 		memmap_p[tidx+1] = temp_region;
+		*nr_memmap = nr_entries + 1;
 	}
 	if ((operation == -1) && tidx >=0) {
 		/* Delete the exact match memory region. */
 		for (j = i+1; j < CRASH_MAX_MEMMAP_NR; j++)
 			memmap_p[j-1] = memmap_p[j];
 		memmap_p[j-1].start = memmap_p[j-1].end = 0;
+		*nr_memmap = nr_entries - 1;
 	}
 
-	dbgprintf("Memmap after deleting segment\n");
-	for (i = 0; i < CRASH_MAX_MEMMAP_NR;  i++) {
-		mstart = memmap_p[i].start;
-		mend = memmap_p[i].end;
-		if (mstart == 0 && mend == 0) {
-			break;
-		}
-		dbgprintf("%016llx - %016llx\n",
-			mstart, mend);
-	}
+	dbgprint_mem_range("Memmap after deleting segment", memmap_p, *nr_memmap);
 
 	return 0;
 }
@@ -804,7 +852,7 @@ int load_crashdump_segments(struct kexec_info *info, char* mod_cmdline,
 {
 	void *tmp;
 	unsigned long sz, bufsz, memsz, elfcorehdr;
-	int nr_ranges = 0, align = 1024, i;
+	int nr_ranges = 0, nr_memmap = 0, align = 1024, i;
 	struct memory_range *mem_range, *memmap_p;
 	struct crash_elf_info elf_info;
 	unsigned kexec_arch;
@@ -848,10 +896,7 @@ int load_crashdump_segments(struct kexec_info *info, char* mod_cmdline,
 
 	get_backup_area(info, mem_range, nr_ranges);
 
-	dbgprintf("CRASH MEMORY RANGES\n");
-
-	for(i = 0; i < nr_ranges; ++i)
-		dbgprintf("%016Lx-%016Lx\n", mem_range[i].start, mem_range[i].end);
+	dbgprint_mem_range("CRASH MEMORY RANGES", mem_range, nr_ranges);
 
 	/*
 	 * if the core type has not been set on command line, set it here
@@ -880,10 +925,10 @@ int load_crashdump_segments(struct kexec_info *info, char* mod_cmdline,
 	sz = (sizeof(struct memory_range) * CRASH_MAX_MEMMAP_NR);
 	memmap_p = xmalloc(sz);
 	memset(memmap_p, 0, sz);
-	add_memmap(memmap_p, info->backup_src_start, info->backup_src_size);
+	add_memmap(memmap_p, &nr_memmap, info->backup_src_start, info->backup_src_size, RANGE_RAM);
 	for (i = 0; i < crash_reserved_mem_nr; i++) {
 		sz = crash_reserved_mem[i].end - crash_reserved_mem[i].start +1;
-		if (add_memmap(memmap_p, crash_reserved_mem[i].start, sz) < 0)
+		if (add_memmap(memmap_p, &nr_memmap, crash_reserved_mem[i].start, sz, RANGE_RAM) < 0)
 			return ENOCRASHKERNEL;
 	}
 
@@ -896,7 +941,7 @@ int load_crashdump_segments(struct kexec_info *info, char* mod_cmdline,
 						0, max_addr, -1);
 		dbgprintf("Created backup segment at 0x%lx\n",
 			  info->backup_start);
-		if (delete_memmap(memmap_p, info->backup_start, sz) < 0)
+		if (delete_memmap(memmap_p, &nr_memmap, info->backup_start, sz) < 0)
 			return EFAILED;
 	}
 
@@ -932,22 +977,34 @@ int load_crashdump_segments(struct kexec_info *info, char* mod_cmdline,
 	elfcorehdr = add_buffer(info, tmp, bufsz, memsz, align, min_base,
 							max_addr, -1);
 	dbgprintf("Created elf header segment at 0x%lx\n", elfcorehdr);
-	if (delete_memmap(memmap_p, elfcorehdr, memsz) < 0)
+	if (delete_memmap(memmap_p, &nr_memmap, elfcorehdr, memsz) < 0)
 		return -1;
-	cmdline_add_memmap(mod_cmdline, memmap_p);
-	cmdline_add_efi(mod_cmdline);
+	if (arch_options.pass_memmap_cmdline)
+		cmdline_add_memmap(mod_cmdline, memmap_p);
+	if (!bzImage_support_efi_boot)
+		cmdline_add_efi(mod_cmdline);
 	cmdline_add_elfcorehdr(mod_cmdline, elfcorehdr);
 
 	/* Inform second kernel about the presence of ACPI tables. */
 	for (i = 0; i < CRASH_MAX_MEMORY_RANGES; i++) {
-		unsigned long start, end;
+		unsigned long start, end, size, type;
 		if ( !( mem_range[i].type == RANGE_ACPI
 			|| mem_range[i].type == RANGE_ACPI_NVS) )
 			continue;
 		start = mem_range[i].start;
 		end = mem_range[i].end;
-		cmdline_add_memmap_acpi(mod_cmdline, start, end);
+		type = mem_range[i].type;
+		size = end - start + 1;
+		add_memmap(memmap_p, &nr_memmap, start, size, type);
+		if (arch_options.pass_memmap_cmdline)
+			cmdline_add_memmap_acpi(mod_cmdline, start, end);
 	}
+
+	/* Store 2nd kernel boot memory ranges for later reference in
+	 * x86-setup-linux.c: setup_linux_system_parameters() */
+	info->crash_range = memmap_p;
+	info->nr_crash_ranges = nr_memmap;
+
 	return 0;
 }
 

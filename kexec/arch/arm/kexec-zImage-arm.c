@@ -226,6 +226,67 @@ int atag_arm_load(struct kexec_info *info, unsigned long base,
 	return 0;
 }
 
+static int setup_dtb_prop(char **bufp, off_t *sizep, const char *node_name,
+		const char *prop_name, const void *val, int len)
+{
+	char *dtb_buf;
+	off_t dtb_size;
+	int off;
+	int prop_len = 0;
+	const struct fdt_property *prop;
+
+	if ((bufp == NULL) || (sizep == NULL) || (*bufp == NULL))
+		die("Internal error\n");
+
+	dtb_buf = *bufp;
+	dtb_size = *sizep;
+
+	/* check if the subnode has already exist */
+	off = fdt_path_offset(dtb_buf, node_name);
+	if (off == -FDT_ERR_NOTFOUND) {
+		dtb_size += fdt_node_len(node_name);
+		fdt_set_totalsize(dtb_buf, dtb_size);
+		dtb_buf = xrealloc(dtb_buf, dtb_size);
+		if (dtb_buf == NULL)
+			die("xrealloc failed\n");
+		off = fdt_add_subnode(dtb_buf, off, node_name);
+	}
+
+	if (off < 0) {
+		fprintf(stderr, "FDT: Error adding %s node.\n", node_name);
+		return -1;
+	}
+
+	prop = fdt_get_property(dtb_buf, off, prop_name, &prop_len);
+	if ((prop == NULL) && (prop_len != -FDT_ERR_NOTFOUND)) {
+		die("FDT: fdt_get_property");
+	} else if (prop == NULL) {
+		/* prop_len == -FDT_ERR_NOTFOUND */
+		/* prop doesn't exist */
+		dtb_size += fdt_prop_len(prop_name, len);
+	} else {
+		if (prop_len < len)
+			dtb_size += len - prop_len;
+	}
+
+	if (fdt_totalsize(dtb_buf) < dtb_size) {
+		fdt_set_totalsize(dtb_buf, dtb_size);
+		dtb_buf = xrealloc(dtb_buf, dtb_size);
+		if (dtb_buf == NULL)
+			die("xrealloc failed\n");
+	}
+
+	if (fdt_setprop(dtb_buf, off, prop_name,
+				val, len) != 0) {
+		fprintf(stderr, "FDT: Error setting %s/%s property.\n",
+				node_name, prop_name);
+		return -1;
+	}
+	*bufp = dtb_buf;
+	*sizep = dtb_size;
+	return 0;
+}
+
 int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 	struct kexec_info *info)
 {
@@ -363,11 +424,11 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 		/* If the image size was passed as command line argument,
 		 * use that value for determining the address for initrd,
 		 * atags and dtb images. page-align the given length.*/
-		initrd_base = base + _ALIGN(kexec_arm_image_size, 4096);
+		initrd_base = base + _ALIGN(kexec_arm_image_size, getpagesize());
 	} else {
 		/* Otherwise, assume the maximum kernel compression ratio
 		 * is 4, and just to be safe, place ramdisk after that */
-		initrd_base = base + len * 4;
+		initrd_base = base + _ALIGN(len * 4, getpagesize());
 	}
 
 	if (use_atags) {
@@ -391,32 +452,14 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 			}
 
 			if (command_line) {
-				const char *node_name = "/chosen";
-				const char *prop_name = "bootargs";
-				int off;
-
-				dtb_length = fdt_totalsize(dtb_buf) + 1024 +
-					strlen(command_line);
-				dtb_buf = xrealloc(dtb_buf, dtb_length);
-				fdt_set_totalsize(dtb_buf, dtb_length);
-
-				/* check if a /choosen subnode already exists */
-				off = fdt_path_offset(dtb_buf, node_name);
-
-				if (off == -FDT_ERR_NOTFOUND)
-					off = fdt_add_subnode(dtb_buf, off, node_name);
-
-				if (off < 0) {
-					fprintf(stderr, "FDT: Error adding %s node.\n", node_name);
+				/*
+				 *  Error should have been reported so
+				 *  directly return -1
+				 */
+				if (setup_dtb_prop(&dtb_buf, &dtb_length, "/chosen",
+						"bootargs", command_line,
+						strlen(command_line) + 1))
 					return -1;
-				}
-
-				if (fdt_setprop(dtb_buf, off, prop_name,
-						command_line, strlen(command_line) + 1) != 0) {
-					fprintf(stderr, "FDT: Error setting %s/%s property.\n",
-						node_name, prop_name);
-					return -1;
-				}
 			}
 		} else {
 			/*
@@ -433,6 +476,19 @@ int zImage_arm_load(int argc, char **argv, const char *buf, off_t len,
 		if (ramdisk) {
 			add_segment(info, ramdisk_buf, initrd_size,
 			            initrd_base, initrd_size);
+
+			unsigned long start, end;
+			start = cpu_to_be32((unsigned long)(initrd_base));
+			end = cpu_to_be32((unsigned long)(initrd_base + initrd_size));
+
+			if (setup_dtb_prop(&dtb_buf, &dtb_length, "/chosen",
+					"linux,initrd-start", &start,
+					sizeof(start)))
+				return -1;
+			if (setup_dtb_prop(&dtb_buf, &dtb_length, "/chosen",
+					"linux,initrd-end", &end,
+					sizeof(end)))
+				return -1;
 		}
 
 		/* Stick the dtb at the end of the initrd and page

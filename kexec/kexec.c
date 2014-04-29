@@ -55,6 +55,16 @@ unsigned long long mem_max = ULONG_MAX;
 static unsigned long kexec_flags = 0;
 int kexec_debug = 0;
 
+void dbgprint_mem_range(const char *prefix, struct memory_range *mr, int nr_mr)
+{
+	int i;
+	dbgprintf("%s\n", prefix);
+	for (i = 0; i < nr_mr; i++) {
+		dbgprintf("%016llx-%016llx (%d)\n", mr[i].start,
+			  mr[i].end, mr[i].type);
+	}
+}
+
 void die(const char *fmt, ...)
 {
 	va_list args;
@@ -277,7 +287,7 @@ unsigned long locate_hole(struct kexec_info *info,
 				hole_base = start;
 				break;
 			} else {
-				hole_base = _ALIGN_DOWN(end - hole_size,
+				hole_base = _ALIGN_DOWN(end - hole_size + 1,
 					hole_align);
 			}
 		}
@@ -693,7 +703,7 @@ static int my_load(const char *type, int fileind, int argc, char **argv,
 	}
 	if (!type || guess_only) {
 		for (i = 0; i < file_types; i++) {
-			if (file_type[i].probe(kernel_buf, kernel_size) >= 0)
+			if (file_type[i].probe(kernel_buf, kernel_size) == 0)
 				break;
 		}
 		if (i == file_types) {

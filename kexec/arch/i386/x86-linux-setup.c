@@ -436,39 +436,394 @@ char *find_mnt_by_fsname(char *fsname)
 	return mntdir;
 }
 
-void setup_subarch(struct x86_linux_param_header *real_mode)
+static int get_bootparam(void *buf, off_t offset, size_t size)
 {
 	int data_file;
-	const off_t offset = offsetof(typeof(*real_mode), hardware_subarch);
-	char *debugfs_mnt;
+	char *debugfs_mnt, *sysfs_mnt;
 	char filename[PATH_MAX];
+	int err, has_sysfs_params = 0;
 
-	debugfs_mnt = find_mnt_by_fsname("debugfs");
-	if (!debugfs_mnt)
-		return;
-	snprintf(filename, PATH_MAX, "%s/%s", debugfs_mnt, "boot_params/data");
-	filename[PATH_MAX-1] = 0;
-	free(debugfs_mnt);
+	sysfs_mnt = find_mnt_by_fsname("sysfs");
+	if (sysfs_mnt) {
+		snprintf(filename, PATH_MAX, "%s/%s", sysfs_mnt,
+			"kernel/boot_params/data");
+		free(sysfs_mnt);
+		err = access(filename, F_OK);
+		if (!err)
+			has_sysfs_params = 1;
+	}
+
+	if (!has_sysfs_params) {
+		debugfs_mnt = find_mnt_by_fsname("debugfs");
+		if (!debugfs_mnt)
+			return 1;
+		snprintf(filename, PATH_MAX, "%s/%s", debugfs_mnt,
+				"boot_params/data");
+		free(debugfs_mnt);
+	}
 
 	data_file = open(filename, O_RDONLY);
 	if (data_file < 0)
-		return;
+		return 1;
 	if (lseek(data_file, offset, SEEK_SET) < 0)
 		goto close;
-	read(data_file, &real_mode->hardware_subarch, sizeof(uint32_t));
+	read(data_file, buf, size);
 close:
 	close(data_file);
+	return 0;
+}
+
+void setup_subarch(struct x86_linux_param_header *real_mode)
+{
+	off_t offset = offsetof(typeof(*real_mode), hardware_subarch);
+
+	get_bootparam(&real_mode->hardware_subarch, offset, sizeof(uint32_t));
+}
+
+struct efi_mem_descriptor {
+	uint32_t type;
+	uint32_t pad;
+	uint64_t phys_addr;
+	uint64_t virt_addr;
+	uint64_t num_pages;
+	uint64_t attribute;
+};
+
+struct efi_setup_data {
+	uint64_t fw_vendor;
+	uint64_t runtime;
+	uint64_t tables;
+	uint64_t smbios;
+	uint64_t reserved[8];
+};
+
+struct setup_data {
+	uint64_t next;
+	uint32_t type;
+#define SETUP_NONE	0
+#define SETUP_E820_EXT	1
+#define SETUP_DTB	2
+#define SETUP_PCI	3
+#define SETUP_EFI	4
+	uint32_t len;
+	uint8_t data[0];
+} __attribute__((packed));
+
+static int get_efi_value(const char *filename,
+			const char *pattern, uint64_t *val)
+{
+	FILE *fp;
+	char line[1024], *s, *end;
+
+	fp = fopen(filename, "r");
+	if (!fp)
+		return 1;
+
+	while (fgets(line, sizeof(line), fp) != 0) {
+		s = strstr(line, pattern);
+		if (!s)
+			continue;
+		*val = strtoull(s + strlen(pattern), &end, 16);
+		if (*val == ULLONG_MAX) {
+			fclose(fp);
+			return 2;
+		}
+		break;
+	}
+
+	fclose(fp);
+	return 0;
+}
+
+static int get_efi_values(struct efi_setup_data *esd)
+{
+	int ret = 0;
+
+	ret = get_efi_value("/sys/firmware/efi/systab", "SMBIOS=0x",
+			    &esd->smbios);
+	ret |= get_efi_value("/sys/firmware/efi/fw_vendor", "0x",
+			     &esd->fw_vendor);
+	ret |= get_efi_value("/sys/firmware/efi/runtime", "0x",
+			     &esd->runtime);
+	ret |= get_efi_value("/sys/firmware/efi/config_table", "0x",
+			     &esd->tables);
+	return ret;
+}
+
+static int get_efi_runtime_map(struct efi_mem_descriptor **map)
+{
+	DIR *dirp;
+	struct dirent *entry;
+	char filename[1024];
+	struct efi_mem_descriptor md, *p = NULL;
+	int nr_maps = 0;
+
+	dirp = opendir("/sys/firmware/efi/runtime-map");
+	if (!dirp)
+		return 0;
+	while ((entry = readdir(dirp)) != NULL) {
+		sprintf(filename,
+			"/sys/firmware/efi/runtime-map/%s",
+			(char *)entry->d_name);
+		if (*entry->d_name == '.')
+			continue;
+		file_scanf(filename, "type", "0x%x", (unsigned int *)&md.type);
+		file_scanf(filename, "phys_addr", "0x%llx",
+			   (unsigned long long *)&md.phys_addr);
+		file_scanf(filename, "virt_addr", "0x%llx",
+			   (unsigned long long *)&md.virt_addr);
+		file_scanf(filename, "num_pages", "0x%llx",
+			   (unsigned long long *)&md.num_pages);
+		file_scanf(filename, "attribute", "0x%llx",
+			   (unsigned long long *)&md.attribute);
+		p = realloc(p, (nr_maps + 1) * sizeof(md));
+		if (!p)
+			goto err_out;
+
+		*(p + nr_maps) = md;
+		*map = p;
+		nr_maps++;
+	}
+
+	closedir(dirp);
+	return nr_maps;
+err_out:
+	if (map)
+		free(map);
+	closedir(dirp);
+	return 0;
+}
+
+struct efi_info {
+	uint32_t efi_loader_signature;
+	uint32_t efi_systab;
+	uint32_t efi_memdesc_size;
+	uint32_t efi_memdesc_version;
+	uint32_t efi_memmap;
+	uint32_t efi_memmap_size;
+	uint32_t efi_systab_hi;
+	uint32_t efi_memmap_hi;
+};
+
+/*
+ * Add another instance to single linked list of struct setup_data.
+ * Please refer to kernel Documentation/x86/boot.txt for more details
+ * about setup_data structure.
+ */
+static void add_setup_data(struct kexec_info *info,
+			   struct x86_linux_param_header *real_mode,
+			   struct setup_data *sd)
+{
+	int sdsize = sizeof(struct setup_data) + sd->len;
+
+	sd->next = real_mode->setup_data;
+	real_mode->setup_data = add_buffer(info, sd, sdsize, sdsize, getpagesize(),
+			    0x100000, ULONG_MAX, INT_MAX);
+}
+
+/*
+ * setup_efi_data will collect below data and pass them to 2nd kernel.
+ * 1) SMBIOS, fw_vendor, runtime, config_table, they are passed via x86
+ *    setup_data.
+ * 2) runtime memory regions, set the memmap related fields in efi_info.
+ */
+static int setup_efi_data(struct kexec_info *info,
+			  struct x86_linux_param_header *real_mode)
+{
+	int64_t memmap_paddr;
+	struct setup_data *sd;
+	struct efi_setup_data *esd;
+	struct efi_mem_descriptor *maps;
+	int nr_maps, size, ret = 0;
+	struct efi_info *ei = (struct efi_info *)real_mode->efi_info;
+
+	ret = access("/sys/firmware/efi/systab", F_OK);
+	if (ret < 0)
+		goto out;
+
+	esd = malloc(sizeof(struct efi_setup_data));
+	if (!esd) {
+		ret = 1;
+		goto out;
+	}
+	memset(esd, 0, sizeof(struct efi_setup_data));
+	ret = get_efi_values(esd);
+	if (ret)
+		goto free_esd;
+	nr_maps = get_efi_runtime_map(&maps);
+	if (!nr_maps) {
+		ret = 2;
+		goto free_esd;
+	}
+	sd = malloc(sizeof(struct setup_data) + sizeof(*esd));
+	if (!sd) {
+		ret = 3;
+		goto free_maps;
+	}
+
+	memset(sd, 0, sizeof(struct setup_data) + sizeof(*esd));
+	sd->next = 0;
+	sd->type = SETUP_EFI;
+	sd->len = sizeof(*esd);
+	memcpy(sd->data, esd, sizeof(*esd));
+	free(esd);
+
+	add_setup_data(info, real_mode, sd);
+
+	size = nr_maps * sizeof(struct efi_mem_descriptor);
+	memmap_paddr = add_buffer(info, maps, size, size, getpagesize(),
+					0x100000, ULONG_MAX, INT_MAX);
+	ei->efi_memmap = memmap_paddr & 0xffffffff;
+	ei->efi_memmap_hi = memmap_paddr >> 32;
+	ei->efi_memmap_size = size;
+	ei->efi_memdesc_size = sizeof(struct efi_mem_descriptor);
+
+	return 0;
+free_maps:
+	free(maps);
+free_esd:
+	free(esd);
+out:
+	return ret;
+}
+
+static void add_e820_map_from_mr(struct x86_linux_param_header *real_mode,
+			struct e820entry *e820, struct memory_range *range, int nr_range)
+{
+	int i;
+
+	for (i = 0; i < nr_range; i++) {
+		e820[i].addr = range[i].start;
+		e820[i].size = range[i].end - range[i].start + 1;
+		switch (range[i].type) {
+			case RANGE_RAM:
+				e820[i].type = E820_RAM;
+				break;
+			case RANGE_ACPI:
+				e820[i].type = E820_ACPI;
+				break;
+			case RANGE_ACPI_NVS:
+				e820[i].type = E820_NVS;
+				break;
+			default:
+			case RANGE_RESERVED:
+				e820[i].type = E820_RESERVED;
+				break;
+		}
+		dbgprintf("%016lx-%016lx (%d)\n",
+				e820[i].addr,
+				e820[i].addr + e820[i].size - 1,
+				e820[i].type);
+
+		if (range[i].type != RANGE_RAM)
+			continue;
+		if ((range[i].start <= 0x100000) && range[i].end > 0x100000) {
+			unsigned long long mem_k = (range[i].end >> 10) - (0x100000 >> 10);
+			real_mode->ext_mem_k = mem_k;
+			real_mode->alt_mem_k = mem_k;
+			if (mem_k > 0xfc00) {
+				real_mode->ext_mem_k = 0xfc00; /* 64M */
+			}
+			if (mem_k > 0xffffffff) {
+				real_mode->alt_mem_k = 0xffffffff;
+			}
+		}
+	}
+}
+
+static void setup_e820_ext(struct kexec_info *info, struct x86_linux_param_header *real_mode,
+			   struct memory_range *range, int nr_range)
+{
+	struct setup_data *sd;
+	struct e820entry *e820;
+	int nr_range_ext;
+
+	nr_range_ext = nr_range - E820MAX;
+	sd = xmalloc(sizeof(struct setup_data) + nr_range_ext * sizeof(struct e820entry));
+	sd->next = 0;
+	sd->len = nr_range_ext * sizeof(struct e820entry);
+	sd->type = SETUP_E820_EXT;
+
+	e820 = (struct e820entry *) sd->data;
+	dbgprintf("Extended E820 via setup_data:\n");
+	add_e820_map_from_mr(real_mode, e820, range + E820MAX, nr_range_ext);
+	add_setup_data(info, real_mode, sd);
+}
+
+static void setup_e820(struct kexec_info *info, struct x86_linux_param_header *real_mode)
+{
+	struct memory_range *range;
+	int nr_range, nr_range_saved;
+
+
+	if (info->kexec_flags & KEXEC_ON_CRASH && !arch_options.pass_memmap_cmdline) {
+		range = info->crash_range;
+		nr_range = info->nr_crash_ranges;
+	} else {
+		range = info->memory_range;
+		nr_range = info->memory_ranges;
+	}
+
+	nr_range_saved = nr_range;
+	if (nr_range > E820MAX) {
+		nr_range = E820MAX;
+	}
+
+	real_mode->e820_map_nr = nr_range;
+	dbgprintf("E820 memmap:\n");
+	add_e820_map_from_mr(real_mode, real_mode->e820_map, range, nr_range);
+
+	if (nr_range_saved > E820MAX) {
+		dbgprintf("extra E820 memmap are passed via setup_data\n");
+		setup_e820_ext(info, real_mode, range, nr_range_saved);
+	}
+}
+
+static int
+get_efi_mem_desc_version(struct x86_linux_param_header *real_mode)
+{
+	struct efi_info *ei = (struct efi_info *)real_mode->efi_info;
+
+	return ei->efi_memdesc_version;
+}
+
+static void setup_efi_info(struct kexec_info *info,
+			   struct x86_linux_param_header *real_mode)
+{
+	int ret, desc_version;
+	off_t offset = offsetof(typeof(*real_mode), efi_info);
+
+	ret = get_bootparam(&real_mode->efi_info, offset, 32);
+	if (ret)
+		return;
+	if (((struct efi_info *)real_mode->efi_info)->efi_memmap_size == 0)
+		/* zero filled efi_info */
+		goto out;
+	desc_version = get_efi_mem_desc_version(real_mode);
+	if (desc_version != 1) {
+		fprintf(stderr,
+			"efi memory descriptor version %d is not supported!\n",
+			desc_version);
+		goto out;
+	}
+	ret = setup_efi_data(info, real_mode);
+	if (ret)
+		goto out;
+
+	return;
+
+out:
+	memset(&real_mode->efi_info, 0, 32);
+	return;
 }
 
 void setup_linux_system_parameters(struct kexec_info *info,
 				   struct x86_linux_param_header *real_mode)
 {
-	/* Fill in information the BIOS would usually provide */
-	struct memory_range *range;
-	int i, ranges;
-
 	/* get subarch from running kernel */
 	setup_subarch(real_mode);
+	if (bzImage_support_efi_boot)
+		setup_efi_info(info, real_mode);
 	
 	/* Default screen size */
 	real_mode->orig_x = 0;
@@ -505,51 +860,7 @@ void setup_linux_system_parameters(struct kexec_info *info,
 	/* another safe default */
 	real_mode->aux_device_info = 0;
 
-	range = info->memory_range;
-	ranges = info->memory_ranges;
-	if (ranges > E820MAX) {
-		if (!(info->kexec_flags & KEXEC_ON_CRASH))
-			/*
-			 * this e820 not used for capture kernel, see
-			 * do_bzImage_load()
-			 */
-			fprintf(stderr,
-				"Too many memory ranges, truncating...\n");
-		ranges = E820MAX;
-	}
-	real_mode->e820_map_nr = ranges;
-	for(i = 0; i < ranges; i++) {
-		real_mode->e820_map[i].addr = range[i].start;
-		real_mode->e820_map[i].size = range[i].end - range[i].start;
-		switch (range[i].type) {
-		case RANGE_RAM:
-			real_mode->e820_map[i].type = E820_RAM; 
-			break;
-		case RANGE_ACPI:
-			real_mode->e820_map[i].type = E820_ACPI; 
-			break;
-		case RANGE_ACPI_NVS:
-			real_mode->e820_map[i].type = E820_NVS;
-			break;
-		default:
-		case RANGE_RESERVED:
-			real_mode->e820_map[i].type = E820_RESERVED; 
-			break;
-		}
-		if (range[i].type != RANGE_RAM)
-			continue;
-		if ((range[i].start <= 0x100000) && range[i].end > 0x100000) {
-			unsigned long long mem_k = (range[i].end >> 10) - (0x100000 >> 10);
-			real_mode->ext_mem_k = mem_k;
-			real_mode->alt_mem_k = mem_k;
-			if (mem_k > 0xfc00) {
-				real_mode->ext_mem_k = 0xfc00; /* 64M */
-			}
-			if (mem_k > 0xffffffff) {
-				real_mode->alt_mem_k = 0xffffffff;
-			}
-		}
-	}
+	setup_e820(info, real_mode);
 
 	/* fill the EDD information */
 	setup_edd_info(real_mode);

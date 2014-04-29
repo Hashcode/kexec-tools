@@ -148,6 +148,8 @@ struct kexec_info {
 	int nr_segments;
 	struct memory_range *memory_range;
 	int memory_ranges;
+	struct memory_range *crash_range;
+	int nr_crash_ranges;
 	void *entry;
 	struct mem_ehdr rhdr;
 	unsigned long backup_start;
@@ -232,6 +234,7 @@ extern int file_types;
 
 #define KEXEC_OPT_STR "h?vdfxluet:p"
 
+extern void dbgprint_mem_range(const char *prefix, struct memory_range *mr, int nr_mr);
 extern void die(const char *fmt, ...)
 	__attribute__ ((format (printf, 1, 2)));
 extern void *xmalloc(size_t size);
